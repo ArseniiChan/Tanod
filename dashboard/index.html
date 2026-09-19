@@ -1,0 +1,1417 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tikbalang · Flood Dispatch</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,500;0,6..72,600;1,6..72,400&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<!--
+  Tikbalang dashboard. One file, no build step.
+
+  Sources (buttons under CUT NETWORK, or keys L / M / R; C toggles the cut):
+    LIVE    WebSocket, default ws://<host>:8765, override with ?ws=ws://host:port
+    MOCK    in-page generator, same frame shapes as the hardware
+    REPLAY  bundled recorded mission (#replay-data), shown with a REPLAY badge
+  Start in a mode with ?src=live|mock|replay.
+
+  Frames in (see docs/DASHBOARD-SPEC.md):
+    node   {src,t,link,water,tds,temp_c,sound,hazard,decided_at,decided_on}
+    unit   {src,t,pose,mode,wp,obstacle_mm,mission,battery_pct}
+  Optional third shape from the dispatch brain. If it never arrives the
+  dashboard derives route + rejected routes from the node frame with the
+  same planner the mock uses (TikbalangSim.plan):
+    brain  {src,t,mission,stage,route:{id,name,len_m},why,rejected:[{id,name,reason}],decided_on}
+
+  Frame out on CUT NETWORK (LIVE only): {"cmd":"cut_network","cut":true|false}
+-->
+<style>
+:root{
+  /* RA 8491 anchors */
+  --flag-blue:#0038A8;
+  --crimson:#CE1126;       /* IMPASSABLE and crisis only */
+  --gold:#FCD116;          /* the sun, and CAUTION */
+  --pearl:#F2EADF;         /* capiz pane fill */
+  --narra:#3B2A1E;         /* the lattice */
+  --teal:#1C7982;          /* water, telemetry, passable */
+
+  /* desaturated working values */
+  --ground-blue:#123C6B;
+  --ground:#121110;        /* page ground: neutral warm near-black */
+  --pane:#1C1A18;          /* capiz pane, lit from behind */
+  --band-blue:#2A4F8C;
+  --pearl-rgb:242,234,223;
+  --teal-ink:#86CBD0;      /* sea teal lifted for text on dark */
+  --ink:#F2EADF;
+  --ink-2:rgba(242,234,223,.78);
+  --ink-3:rgba(242,234,223,.52);
+  --hair:rgba(242,234,223,.10);
+  --shut:#0E0A07;
+
+  --serif:'Newsreader',Georgia,serif;
+  --sans:'IBM Plex Sans',system-ui,sans-serif;
+  --cond:'IBM Plex Sans Condensed','IBM Plex Sans',system-ui,sans-serif;
+  --mono:'IBM Plex Mono',ui-monospace,Menlo,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--ground);color:var(--ink)}
+body{font:400 18px/1.45 var(--sans);-webkit-font-smoothing:antialiased;overflow-x:hidden;
+  display:flex;flex-direction:column;height:100vh;min-height:860px}
+
+/* ---------- flag band ---------- */
+.flagband{position:relative;z-index:2;flex:none;height:8px;overflow:hidden;cursor:help}
+.band{position:absolute;left:0;right:0;height:50%;transition:transform 400ms ease}
+.band.blue{top:0;background:var(--band-blue)}
+.band.red{top:50%;background:var(--crimson)}
+body.crisis .band.blue{transform:translateY(100%)}
+body.crisis .band.red{transform:translateY(-100%)}
+
+.app{position:relative;z-index:1;flex:1;min-height:0;display:grid;
+  grid-template-rows:auto auto minmax(0,1fr) auto;gap:14px;padding:14px 32px 18px}
+
+/* ---------- header ---------- */
+.top{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:24px}
+.brand h1{margin:0;font:600 36px/1 var(--serif);letter-spacing:.16em}
+.brand p{margin:6px 0 0;font:italic 400 18px/1.2 var(--serif);color:var(--ink-3)}
+.sunbox{display:flex;align-items:center;gap:14px}
+.sunbox .cv{width:68px;height:68px}
+.sunword{font:600 20px/1.1 var(--cond);letter-spacing:.08em;text-transform:uppercase}
+.sunword small{display:block;margin-top:3px;font:400 16px/1.2 var(--sans);letter-spacing:0;text-transform:none;color:var(--ink-3)}
+.run{justify-self:end;display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+.run-row{display:flex;align-items:center;gap:10px}
+.badge{display:inline-flex;align-items:center;gap:10px;font:700 20px/1 var(--cond);letter-spacing:.08em;
+  padding:9px 14px 8px;border:2px solid currentColor;border-radius:2px;white-space:nowrap}
+.badge .led{width:10px;height:10px;border-radius:50%;background:currentColor}
+.badge[data-mode=local]{color:var(--ink)}
+.badge[data-mode=local] .led{background:var(--teal-ink);box-shadow:0 0 0 3px rgba(134,203,208,.2)}
+.badge[data-mode=cloud]{color:var(--gold)}
+.badge[data-mode=none]{color:var(--ink-3)}
+.badge.replay{color:var(--gold);letter-spacing:.16em}
+.badge.src{color:var(--ink-2);font-weight:600;font-size:16px;border-width:1.5px}
+.run-sub{font:400 16px/1.2 var(--mono);color:var(--ink-3)}
+.crisis-note{display:none;font:600 16px/1 var(--cond);letter-spacing:.1em;color:var(--ink);background:var(--crimson);padding:6px 10px 5px}
+body.crisis .crisis-note{display:inline-block}
+
+/* ---------- mission stepper ---------- */
+.stepper{display:grid;grid-template-columns:auto 1fr;align-items:center;gap:28px;
+  padding:10px 0 11px;border-top:1px solid var(--hair);border-bottom:1px solid var(--hair)}
+.mission{font:400 16px/1.2 var(--sans);color:var(--ink-3)}
+.mission b{display:block;margin-top:2px;font:500 22px/1 var(--mono);color:var(--ink)}
+.steps{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(5,1fr)}
+.steps li{position:relative;display:flex;flex-direction:column;align-items:center;gap:8px;color:var(--ink-3)}
+.steps li::before{content:"";position:absolute;top:8px;right:50%;width:100%;height:2px;background:var(--hair);z-index:0}
+.steps li:first-child::before{display:none}
+.steps li.done::before,.steps li.now::before{background:rgba(var(--pearl-rgb),.55)}
+.dot{position:relative;z-index:1;width:18px;height:18px;border-radius:50%;border:2px solid rgba(var(--pearl-rgb),.35);background:var(--ground)}
+.steps .nm{font:600 18px/1 var(--cond);letter-spacing:.08em;text-transform:uppercase}
+.steps li.done{color:var(--ink-2)}
+.steps li.done .dot{background:var(--pearl);border-color:var(--pearl)}
+.steps li.now{color:var(--ink)}
+.steps li.now .dot{background:var(--gold);border-color:var(--gold);box-shadow:0 0 0 5px rgba(252,209,22,.14)}
+.steps li.now .nm::after{content:" · now";color:var(--gold)}
+
+/* ---------- the two windows ---------- */
+.split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:32px;min-height:0}
+.side{display:grid;grid-template-rows:auto minmax(0,1fr);gap:10px;min-height:0}
+.side-head{display:grid;grid-template-columns:40px 1fr auto;align-items:center;gap:14px}
+.side-head .cv{width:40px;height:40px}
+.side-head h2{margin:0;font:600 28px/1.1 var(--serif);letter-spacing:.02em}
+.side-head p{margin:2px 0 0;font:400 16px/1.2 var(--sans);color:var(--ink-3)}
+.chip{font:700 16px/1 var(--cond);letter-spacing:.1em;text-transform:uppercase;padding:7px 10px 6px;border:1.5px solid currentColor;border-radius:2px;white-space:nowrap}
+.chip[data-s=live]{color:var(--ink-2)}
+.chip[data-s=none],.chip[data-s=stale],.chip[data-s=frozen]{color:var(--ink-3)}
+
+/* A capiz window: narra frame, thin shared muntins, shell panes. */
+.capiz{position:relative;min-height:0;display:grid;
+  grid-template-columns:minmax(0,1.65fr) minmax(0,1fr);grid-template-rows:auto minmax(170px,1fr);
+  gap:4px;background:var(--narra);border:6px solid var(--narra)}
+.pane{position:relative;min-width:0;min-height:0;overflow:hidden;padding:18px 22px;
+  --a:.12;
+  background:linear-gradient(180deg, rgba(242,234,223,var(--a)), rgba(242,234,223,calc(var(--a) * .4))) , var(--pane)}
+.pane > *{position:relative;z-index:1}
+.pane::after{content:"";position:absolute;inset:0;background:var(--shut);opacity:0;z-index:2;pointer-events:none;transition:opacity 400ms ease}
+.lbl{font:500 16px/1.2 var(--sans);color:var(--ink-3)}
+.meta{font:400 16px/1.3 var(--mono);color:var(--ink-3)}
+.cv{position:relative;min-width:0;min-height:0}
+.cv canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+
+/* hazard */
+.hazard{display:flex;flex-direction:column}
+.hazard > *{flex-shrink:0}
+.hz-wash{position:absolute;inset:0;background:var(--crimson);opacity:0;transition:opacity 300ms;z-index:0 !important}
+.hz-word{margin:8px 0 12px;font:700 clamp(64px,4vw,78px)/.95 var(--cond);color:var(--ink-3)}
+.hz-why{font:400 21px/1.35 var(--sans);color:var(--ink);max-width:34ch}
+.hz-meta{margin-top:auto;padding-top:8px}
+.hazard[data-hz=SHALLOW_CROSSING] .hz-word{color:var(--teal-ink)}
+.hazard[data-hz=CONTAMINATED] .hz-word{color:var(--gold)}
+.hazard[data-hz=IMPASSABLE] .hz-wash{opacity:.42}
+.hazard[data-hz=IMPASSABLE] .hz-word{color:var(--ink);text-shadow:0 2px 0 rgba(0,0,0,.25)}
+.crisis-note{white-space:nowrap}
+
+/* water */
+.water{display:flex;flex-direction:column;gap:10px}
+.water-body{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px}
+.w-read{display:flex;flex-direction:column;justify-content:flex-end;padding-bottom:4px;min-width:0}
+.w-big{font:700 56px/1 var(--cond)}
+.w-big .of{font-size:24px;font-weight:500;color:var(--ink-3)}
+.w-sub{font:400 16px/1.3 var(--sans);color:var(--ink-3)}
+.w-mm{margin-top:10px;font:500 26px/1.1 var(--mono);color:var(--teal-ink)}
+.w-tds{margin-top:6px}
+
+/* map */
+.map{grid-column:1 / -1;display:flex;flex-direction:column;padding:14px 18px 10px}
+.map .cv{flex:1}
+.map .lbl{position:absolute;left:22px;top:14px}
+
+/* blackout (central, on cut) */
+.blackout{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:5;pointer-events:none;
+  text-align:center;padding:26px 40px 24px;background:rgba(8,6,4,.92);border:2px solid rgba(var(--pearl-rgb),.14);
+  opacity:0;transition:opacity 300ms ease;width:min(80%,560px)}
+.bo-kicker{font:600 16px/1.2 var(--cond);letter-spacing:.22em;color:var(--ink-3)}
+.bo-title{font:600 38px/1.1 var(--serif);color:var(--ink);margin:10px 0 12px}
+.bo-sub{font:400 17px/1.3 var(--mono);color:var(--ink-2)}
+
+/* THE moment: the central window's panes go dark and opaque; ours keep glowing */
+.side.dark .pane::after{opacity:.94;animation:lightsout 600ms ease-out calc(var(--i,0) * 60ms) both}
+.side.dark .pane > *{filter:grayscale(1) brightness(.7);opacity:.35;transition:filter 500ms,opacity 500ms}
+.side.dark .blackout{opacity:1;transition-delay:280ms}
+.side.dark .side-head{opacity:.55;transition:opacity 500ms}
+@keyframes lightsout{0%{opacity:0}16%{opacity:.6}26%{opacity:.15}44%{opacity:.85}58%{opacity:.6}100%{opacity:.94}}
+body.cut #p-edge .pane{--lift:.025}
+#p-edge .pane{background:linear-gradient(180deg, rgba(242,234,223,calc(var(--a) + var(--lift,0))), rgba(242,234,223,calc(var(--a) * .4 + var(--lift,0)))), var(--pane)}
+
+/* ---------- bottom: the control, the reasons, the frames ---------- */
+.bottom{display:grid;grid-template-columns:320px minmax(0,1.55fr) minmax(0,.8fr);gap:32px;height:196px;
+  padding-top:14px;border-top:1px solid var(--hair)}
+.control{display:flex;flex-direction:column;gap:12px;min-height:0}
+#cutBtn{flex:1;display:grid;grid-template-columns:auto 1fr;align-items:center;gap:16px;text-align:left;cursor:pointer;
+  padding:0 20px;border:0;border-radius:3px;background:var(--pearl);color:#241910;
+  box-shadow:0 5px 0 #8F8274;transform:translateY(0);
+  transition:transform 90ms ease, box-shadow 90ms ease, background-color 200ms, color 200ms}
+#cutBtn:hover{background:#FFF8EE}
+#cutBtn:active{transform:translateY(5px);box-shadow:0 1px 0 #9A8C7C, 0 3px 8px rgba(0,0,0,.4)}
+#cutBtn:focus-visible{outline:3px solid var(--gold);outline-offset:4px}
+#cutBtn svg{width:40px;height:40px}
+#cutBtn .cb-main{display:block;font:700 30px/1 var(--cond);letter-spacing:.05em;white-space:nowrap}
+#cutBtn .cb-sub{display:block;margin-top:6px;font:500 16px/1.25 var(--sans);opacity:.75}
+#cutBtn[aria-pressed=true]{background:#16100B;color:var(--gold);transform:translateY(5px);
+  box-shadow:inset 0 0 0 2px var(--gold), 0 1px 0 #000}
+#cutBtn[aria-pressed=true] .cb-sub{color:var(--ink-2);opacity:1}
+.srcs{display:grid;grid-template-columns:repeat(3,1fr);border:1.5px solid var(--hair);border-radius:2px}
+.srcs button{font:600 16px/1 var(--cond);letter-spacing:.12em;padding:9px 0 8px;border:0;cursor:pointer;background:transparent;color:var(--ink-3)}
+.srcs button + button{border-left:1.5px solid var(--hair)}
+.srcs button[aria-pressed=true]{background:rgba(var(--pearl-rgb),.14);color:var(--ink)}
+.srcs button:focus-visible{outline:2px solid var(--gold);outline-offset:-2px}
+
+.sec-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:10px}
+.sec-head h3{margin:0;font:600 22px/1 var(--serif);letter-spacing:.02em}
+.routes{min-height:0;overflow:hidden;display:flex;flex-direction:column}
+.rt{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:5px}
+.rt li{display:grid;grid-template-columns:30px 1fr;gap:4px 10px;align-items:baseline}
+.rt .ic{font:700 20px/1 var(--sans);text-align:center}
+.rt .nm{font:600 19px/1.25 var(--sans)}
+.rt .nm small{font:400 16px var(--mono);color:var(--ink-3);margin-left:8px}
+.rt .rs{grid-column:2;font:400 17px/1.3 var(--sans);color:var(--ink-2)}
+.rt li{row-gap:1px}
+.rt li.take .ic{color:var(--teal-ink)}
+.rt li.no .ic{color:var(--ink-3)}
+.rt li.blocked .ic{color:var(--pearl);background:var(--crimson);border-radius:2px}
+.rt li.no .nm,.rt li.blocked .nm{font-weight:500;color:var(--ink-2)}
+.rt-state{font:700 16px/1 var(--cond);letter-spacing:.1em;margin-left:8px}
+.rt-empty{font:400 18px/1.4 var(--sans);color:var(--ink-3)}
+.frames{min-height:0;display:flex;flex-direction:column}
+.frames .sec-head{flex-direction:column;align-items:flex-start;gap:6px}
+.rate{font:400 16px/1.2 var(--mono);color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#tail{flex:1;min-height:0;overflow:hidden;font:400 16px/1.5 var(--mono);color:var(--ink-3);
+  -webkit-mask-image:linear-gradient(to bottom, transparent 0, #000 45%);mask-image:linear-gradient(to bottom, transparent 0, #000 45%)}
+.tl{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tl .ts{color:rgba(var(--pearl-rgb),.35)}
+.tl.k-node{color:var(--teal-ink)}
+.tl.k-dispatch{color:var(--ink-2)}
+.tl.note{color:var(--gold)}
+.tl:last-child{color:var(--ink)}
+.tl.k-node:last-child{color:#B3E2E6}
+
+/* ---------- smaller screens ---------- */
+@media (max-width:1180px){
+  body{height:auto;min-height:0}
+  .split{grid-template-columns:minmax(0,1fr)}
+  .capiz{height:600px}
+  .bottom{grid-template-columns:1fr;height:auto}
+  .control{height:190px}
+  .frames{height:220px}
+  .top{grid-template-columns:1fr auto}
+  .run{grid-column:1 / -1;justify-self:start;align-items:flex-start}
+}
+@media (max-width:640px){
+  .app{padding:12px 16px}
+  .steps .nm{font-size:16px;letter-spacing:0}
+  .steps li.now .nm::after{content:""}
+  .stepper{grid-template-columns:1fr}
+  .capiz{grid-template-columns:1fr;grid-template-rows:auto 220px 260px;height:auto}
+}
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{transition:none !important;animation:none !important}
+}
+</style>
+</head>
+<body>
+
+<div class="flagband" id="flagband" role="img"
+     aria-label="Flag bands, blue above red. Inverts to red above blue when a crossing is impassable."
+     title="Blue above red is the Philippine flag in peacetime. Republic Act 8491 makes the Philippines the only country that flies its flag inverted, red above blue, to signal a state of war. This band inverts when any crossing reaches IMPASSABLE.">
+  <div class="band blue"></div><div class="band red"></div>
+</div>
+
+<div class="app">
+  <header class="top">
+    <div class="brand">
+      <h1>TIKBALANG</h1>
+      <p>Flood dispatch that keeps deciding when the network dies.</p>
+    </div>
+    <div class="sunbox">
+      <div class="cv" title="Eight rays for the eight provinces that first revolted: Manila, Cavite, Bulacan, Pampanga, Nueva Ecija, Bataan, Laguna and Batangas (NCCA). Rotates while decisions arrive, pulses on each one, freezes when the decision source is lost."><canvas id="sunMain" aria-hidden="true"></canvas></div>
+      <div class="sunword" id="sunLabel">Awaiting node<small>no decision yet</small></div>
+    </div>
+    <div class="run">
+      <div class="run-row">
+        <span class="crisis-note">FLAG INVERTED · IMPASSABLE</span>
+        <span id="srcBadge"></span>
+        <span class="badge" id="runBadge" data-mode="none"><span class="led"></span><span id="runText">AWAITING NODE</span></span>
+      </div>
+      <div class="run-sub" id="runSub">decided_on — · uplink —</div>
+    </div>
+  </header>
+
+  <nav class="stepper" aria-label="Mission stages">
+    <div class="mission">Mission<b id="missionId">—</b></div>
+    <ol class="steps" id="steps">
+      <li><span class="dot"></span><span class="nm">Requested</span></li>
+      <li><span class="dot"></span><span class="nm">Triaged</span></li>
+      <li><span class="dot"></span><span class="nm">Dispatched</span></li>
+      <li><span class="dot"></span><span class="nm">En route</span></li>
+      <li><span class="dot"></span><span class="nm">Delivered</span></li>
+    </ol>
+  </nav>
+
+  <main class="split">
+    <section class="side" id="p-central" aria-label="Central dispatch, counterfactual"
+      title="Counterfactual: the same frames, routed through a cloud dispatch server. Cut the network and it has nothing to decide with."></section>
+    <section class="side" id="p-edge" aria-label="Edge autonomy, Tikbalang"></section>
+  </main>
+
+  <footer class="bottom">
+    <div class="control">
+      <button id="cutBtn" type="button" aria-pressed="false" title="Keyboard: C">
+        <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" aria-hidden="true">
+          <path d="M8 34a14 14 0 0 1 14-14"/><path d="M4 20a22 22 0 0 1 22-14"/><circle cx="10" cy="38" r="2.6" fill="currentColor" stroke="none"/>
+          <path d="M30 26l12 12M42 26L30 38"/>
+        </svg>
+        <span><span class="cb-main">CUT NETWORK</span><span class="cb-sub">Sever the uplink to the cloud</span></span>
+      </button>
+      <div class="srcs" role="group" aria-label="Data source">
+        <button type="button" data-src="live" aria-pressed="false" title="Keyboard: L">LIVE</button>
+        <button type="button" data-src="mock" aria-pressed="false" title="Keyboard: M">MOCK</button>
+        <button type="button" data-src="replay" aria-pressed="false" title="Keyboard: R">REPLAY</button>
+      </div>
+    </div>
+    <section class="routes" aria-label="Routes considered">
+      <div class="sec-head"><h3>Why this route</h3><span class="meta" id="routesSrc"></span></div>
+      <div id="routesBody"><div class="rt-empty">No route decided yet. Waiting for a node frame.</div></div>
+    </section>
+    <section class="frames" aria-label="Raw telemetry">
+      <div class="sec-head"><h3>Raw frames</h3><span class="rate" id="teleRate">no frames</span></div>
+      <div id="tail" aria-live="off"></div>
+    </section>
+  </footer>
+</div>
+
+<template id="panelTpl">
+  <div class="side-head">
+    <div class="cv"><canvas class="psun" aria-hidden="true"></canvas></div>
+    <div><h2 class="pname"></h2><p class="psub"></p></div>
+    <div class="chip pstate" data-s="none">AWAITING NODE</div>
+  </div>
+  <div class="capiz">
+    <div class="pane hazard" style="--i:0" data-hz="NONE">
+      <div class="hz-wash"></div>
+      <div class="lbl hz-label">Hazard at node-01</div>
+      <div class="hz-word">AWAITING NODE</div>
+      <div class="hz-why"></div>
+      <div class="meta hz-meta"></div>
+    </div>
+    <div class="pane water" style="--i:1">
+      <div class="lbl">Water ladder</div>
+      <div class="water-body">
+        <div class="w-read">
+          <div class="w-big"><span class="w-wet">–</span><span class="of"> of 6</span></div>
+          <div class="w-sub">rungs wet</div>
+          <div class="w-mm">— mm</div>
+          <div class="meta w-tds">TDS —</div>
+        </div>
+        <div class="cv" style="width:118px"><canvas class="gauge" aria-hidden="true"></canvas></div>
+      </div>
+    </div>
+    <div class="pane map" style="--i:2">
+      <div class="lbl">Route map</div>
+      <div class="cv"><canvas class="mapc" role="img" aria-label="Top down map of node, target, chosen route and robot"></canvas></div>
+    </div>
+    <div class="blackout">
+      <div class="bo-kicker">UPLINK CUT</div>
+      <div class="bo-title">Awaiting dispatch server</div>
+      <div class="bo-sub">no decision since the cut</div>
+    </div>
+  </div>
+</template>
+
+<script id="sim">
+(function (g) {
+  'use strict';
+  const LAT0 = 42.35983, LON0 = -71.09211;
+  const M_LAT = 111320, M_LON = 111320 * Math.cos(LAT0 * Math.PI / 180);
+  const RUNGS = 6, MM_PER_RUNG = 10, PASSABLE_MM = 40;
+
+  // Site in metres, x east, y north, depot at the origin.
+  const SITE = {
+    bounds: { x0: -14, x1: 304, y0: -49, y1: 51 },
+    node: { id: 'node-01', xy: [156, -22] },
+    depot: [0, 0], target: [290, 2],
+    channel: { x0: 140, x1: 172 },
+    bridge: { y: 44, x0: 133, x1: 179 },
+    lowland: { cx: 156, cy: -36, rx: 58, ry: 8 },
+    routes: {
+      'south-crossing': { name: 'south crossing', pts: [[0,0],[22,0],[60,-14],[115,-20],[156,-22],[200,-18],[250,-8],[290,2]], mark: [156,-22], label: [88,-8] },
+      'north-bridge':   { name: 'north bridge',   pts: [[0,0],[22,0],[34,30],[100,44],[156,44],[210,44],[268,28],[290,2]], mark: [156,44], label: [80,26] },
+      'lowland-loop':   { name: 'lowland loop',   pts: [[0,0],[22,0],[70,-32],[156,-36],[235,-30],[290,2]], mark: [156,-36], label: [96,-44] }
+    }
+  };
+  function polyLen(p) { let L = 0; for (let i = 1; i < p.length; i++) L += Math.hypot(p[i][0]-p[i-1][0], p[i][1]-p[i-1][1]); return L; }
+  for (const id in SITE.routes) { SITE.routes[id].id = id; SITE.routes[id].len = polyLen(SITE.routes[id].pts); }
+
+  const r1 = v => Math.round(v * 10) / 10, r2 = v => Math.round(v * 100) / 100;
+  function toLL(x, y) { return { lat: +(LAT0 + y / M_LAT).toFixed(6), lon: +(LON0 + x / M_LON).toFixed(6) }; }
+  function toXY(lat, lon) { return { x: (lon - LON0) * M_LON, y: (lat - LAT0) * M_LAT }; }
+
+  // The dispatch planner. Same function drives the mock brain and the
+  // dashboard fallback when no brain frame is present.
+  function plan(node, committed, pastCrossing) {
+    if (!node || !node.water) return null;
+    const mm = node.water.mm, st = node.hazard && node.hazard.state, ppm = node.tds && node.tds.ppm, src = node.src || 'node-01';
+    const S = SITE.routes['south-crossing'], N = SITE.routes['north-bridge'], L = SITE.routes['lowland-loop'];
+    const R = r => ({ id: r.id, name: r.name, len_m: Math.round(r.len) });
+    const low = { id: L.id, name: L.name, reason: `lowland loop lies below the south crossing, so deeper than ${mm} mm, and no sensor covers it` };
+    const southDeep = mm > PASSABLE_MM || st === 'IMPASSABLE';
+    if (committed === 'south-crossing' && pastCrossing) {
+      return { route: R(S), why: `unit is already across the channel; finishing on the south side`,
+        rejected: [{ id: N.id, name: N.name, reason: `north bridge would mean crossing back over the channel` }, low] };
+    }
+    if (southDeep) {
+      return { route: R(N), why: `south crossing is ${mm} mm deep at ${src}; taking the bridge`,
+        rejected: [{ id: S.id, name: S.name, reason: `south crossing ${mm} mm at ${src}, exceeds passable depth ${PASSABLE_MM} mm` }, low] };
+    }
+    if (committed === 'north-bridge') {
+      return { route: R(N), why: `staying on the bridge route already under way`,
+        rejected: [{ id: S.id, name: S.name, reason: `south crossing back to ${mm} mm, but turning around now costs more than finishing via the bridge` }, low] };
+    }
+    const why = st === 'CONTAMINATED'
+      ? `south crossing is contaminated at ${ppm} ppm, but ${mm} mm is within passable depth and the payload is sealed`
+      : `south crossing is ${mm} mm, within passable depth ${PASSABLE_MM} mm, and shortest`;
+    return { route: R(S), why,
+      rejected: [{ id: N.id, name: N.name, reason: `north bridge ${Math.round(N.len)} m, ${Math.round(N.len - S.len)} m longer than the south crossing at ${mm} mm` }, low] };
+  }
+
+  function mulberry32(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+  const smooth = x => { x = Math.max(0, Math.min(1, x)); return x * x * (3 - 2 * x); };
+  function along(path, d) {
+    let acc = 0;
+    for (let i = 1; i < path.length; i++) {
+      const a = path[i-1], b = path[i], L = Math.hypot(b[0]-a[0], b[1]-a[1]);
+      if (L > 0 && acc + L >= d) {
+        const f = (d - acc) / L;
+        return { pos: [a[0] + (b[0]-a[0]) * f, a[1] + (b[1]-a[1]) * f], seg: i - 1, hdg: (Math.atan2(b[0]-a[0], b[1]-a[1]) * 180 / Math.PI + 360) % 360 };
+      }
+      acc += L;
+    }
+    const n = path.length, a = path[n-2], b = path[n-1];
+    return { pos: b.slice(), seg: n - 2, hdg: (Math.atan2(b[0]-a[0], b[1]-a[1]) * 180 / Math.PI + 360) % 360, end: true };
+  }
+
+  // One 96 s mission: request, triage, dispatch south, water rises through
+  // CONTAMINATED to IMPASSABLE, the brain reroutes over the bridge, delivery.
+  function createSim(opts) {
+    opts = opts || {};
+    const rng = mulberry32(opts.seed == null ? 7 : opts.seed);
+    const nodeDt = 1 / (opts.nodeHz || 2), unitDt = 1 / (opts.unitHz || 4);
+    const LOOP = 96, SPEED = 7;
+    const S = SITE.routes['south-crossing'];
+    const crossD = polyLen(S.pts.slice(0, 5));
+    let T = opts.t0 == null ? Date.now() / 1000 : opts.t0;
+    let s = 0, cut = false, missionN = opts.mission || 7;
+    let robot, committed, curPlan, accNode, accUnit, accDisp, lastStage, lastRoute, battery, obstacle;
+
+    function reset() {
+      robot = { path: S.pts.map(p => p.slice()), d: 0, pos: [0, 0], hdg: 90, seg: 0, arrived: false, rerouteAt: -99 };
+      committed = null; curPlan = null; accNode = nodeDt; accUnit = unitDt; accDisp = 0;
+      lastStage = null; lastRoute = null; battery = 87; obstacle = 1800;
+    }
+    reset();
+
+    function wetAt(t) { const sch = [[0,2],[12,3],[20,4],[27,5],[40,6],[56,5],[68,4],[80,3],[90,2]]; let w = 2; for (const [k, v] of sch) if (t >= k) w = v; return w; }
+    function tdsAt(t) { return t < 56 ? 412 + 768 * smooth(t / 32) : 1180 - 768 * smooth((t - 56) / 40); }
+
+    function nodeFrame() {
+      const wet = wetAt(s), mm = wet * MM_PER_RUNG;
+      const ppm = Math.max(0, Math.round(tdsAt(s) + (rng() - .5) * 10));
+      const dT = tdsAt(s) - tdsAt(Math.max(0, s - 2));
+      const trend = dT > 12 ? 'rising' : dT < -12 ? 'falling' : 'steady';
+      const sound = wet >= 5 ? { event: 'rushing_water', conf: r2(.72 + rng() * .2) }
+                  : wet === 4 ? { event: 'rain', conf: r2(.55 + rng() * .2) }
+                  : { event: 'none', conf: 0.0 };
+      let st, why, conf;
+      if (wet >= 5) { st = 'IMPASSABLE'; conf = .9 + rng() * .08; why = `${wet} of 6 rungs wet, rushing water heard, too deep to cross on foot`; }
+      else if (ppm >= 900) { st = 'CONTAMINATED'; conf = .8 + rng() * .1; why = `${wet} of 6 rungs wet, dissolved solids ${ppm} ppm and ${trend}`; }
+      else { st = 'SHALLOW_CROSSING'; conf = .82 + rng() * .1; why = `${wet} of 6 rungs wet, dissolved solids ${trend}`; }
+      const t = r2(T);
+      return { src: 'node-01', t, link: { uplink: !cut, inference: 'local' },
+        water: { rungs: RUNGS, wet, mm }, tds: { ppm, trend }, temp_c: r1(18.4 - s * 0.004 + (rng() - .5) * .2),
+        sound, hazard: { state: st, conf: r2(conf), why }, decided_at: t, decided_on: 'device' };
+    }
+
+    function reroute(id) {
+      const old = robot.path, back = [robot.pos.slice()];
+      for (let k = robot.seg; k >= 1; k--) back.push(old[k].slice());
+      robot.path = back.concat(SITE.routes[id].pts.slice(2).map(q => q.slice()));
+      robot.d = 0; robot.rerouteAt = s;
+    }
+
+    function step(dt) {
+      const out = [];
+      s += dt; T += dt;
+      if (s >= LOOP) { s -= LOOP; missionN++; reset(); }
+      const stage = s < 3 ? 'REQUESTED' : s < 6 ? 'TRIAGED' : s < 8 ? 'DISPATCHED' : robot.arrived ? 'DELIVERED' : 'EN_ROUTE';
+      const node = nodeFrame();
+
+      if (s >= 6 && !robot.arrived) {
+        const past = committed === 'south-crossing' && robot.rerouteAt < 0 && robot.d > crossD;
+        const p = plan(node, committed, past);
+        if (p.route.id !== committed) {
+          if (committed && stage === 'EN_ROUTE') reroute(p.route.id);
+          else robot.path = SITE.routes[p.route.id].pts.map(q => q.slice());
+          committed = p.route.id;
+        }
+        curPlan = p;
+      }
+      if (stage === 'EN_ROUTE') { robot.d += SPEED * dt; battery -= 0.03 * dt; }
+      const a = along(robot.path, robot.d);
+      robot.pos = a.pos; robot.seg = a.seg;
+      if (stage === 'EN_ROUTE') robot.hdg = a.hdg;
+      if (a.end && stage === 'EN_ROUTE') robot.arrived = true;
+      obstacle = Math.max(310, Math.min(2400, obstacle + (rng() - .5) * 160));
+
+      const mode = (stage === 'REQUESTED' || stage === 'TRIAGED') ? 'IDLE' : stage === 'DISPATCHED' ? 'PLANNING'
+                 : stage === 'DELIVERED' ? 'ARRIVED' : (s - robot.rerouteAt < 4 ? 'REROUTING' : 'DRIVING');
+      const routeId = curPlan ? curPlan.route.id : null;
+      accNode += dt; accUnit += dt; accDisp += dt;
+
+      if (stage !== lastStage || routeId !== lastRoute || accDisp >= 4) {
+        accDisp = 0; lastStage = stage; lastRoute = routeId;
+        let why = curPlan ? curPlan.why : stage === 'REQUESTED' ? 'request from evac point: 12 L potable water for 3 households' : 'triaging request against the node-01 hazard reading';
+        if (stage === 'DELIVERED' && curPlan) why = `delivered to evac point via ${curPlan.route.name}`;
+        out.push({ src: 'brain-01', t: r2(T), mission: 'm-' + missionN, stage,
+          route: curPlan ? curPlan.route : null, why, rejected: curPlan ? curPlan.rejected : [], decided_on: 'device' });
+      }
+      if (accNode >= nodeDt) { accNode %= nodeDt; out.push(node); }
+      if (accUnit >= unitDt) {
+        accUnit %= unitDt;
+        const ll = toLL(robot.pos[0], robot.pos[1]);
+        out.push({ src: 'unit-01', t: r2(T), pose: { lat: ll.lat, lon: ll.lon, hdg: r1(robot.hdg) }, mode,
+          wp: Math.min(robot.seg + 1, robot.path.length - 1), obstacle_mm: Math.round(obstacle),
+          mission: 'm-' + missionN, battery_pct: Math.round(battery) });
+      }
+      return out;
+    }
+    return { step, setCut(v) { cut = !!v; }, get scenarioTime() { return s; } };
+  }
+
+  g.TikbalangSim = { SITE, toLL, toXY, plan, createSim, PASSABLE_MM, RUNGS };
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
+
+<!-- Recorded mission m-7 for REPLAY. Generated from the sim above at node 1 Hz, unit 2 Hz. -->
+<script type="application/json" id="replay-data">[
+{"src":"brain-01","t":1789840000.05,"mission":"m-7","stage":"REQUESTED","route":null,"why":"request from evac point: 12 L potable water for 3 households","rejected":[],"decided_on":"device"},
+{"src":"node-01","t":1789840000.05,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":2,"mm":20},"tds":{"ppm":407,"trend":"steady"},"temp_c":18.5,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.83,"why":"2 of 6 rungs wet, dissolved solids steady"},"decided_at":1789840000.05,"decided_on":"device"},
+{"src":"unit-01","t":1789840000.05,"pose":{"lat":42.35983,"lon":-71.09211,"hdg":90},"mode":"IDLE","wp":1,"obstacle_mm":1832,"mission":"m-7","battery_pct":87},
+{"src":"unit-01","t":1789840000.5,"pose":{"lat":42.35983,"lon":-71.09211,"hdg":90},"mode":"IDLE","wp":1,"obstacle_mm":1839,"mission":"m-7","battery_pct":87},
+{"src":"node-01","t":1789840001,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":2,"mm":20},"tds":{"ppm":417,"trend":"steady"},"temp_c":18.4,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.82,"why":"2 of 6 rungs wet, dissolved solids steady"},"decided_at":1789840001,"decided_on":"device"},
+{"src":"unit-01","t":1789840001.05,"pose":{"lat":42.35983,"lon":-71.09211,"hdg":90},"mode":"IDLE","wp":1,"obstacle_mm":1997,"mission":"m-7","battery_pct":87},
+{"src":"unit-01","t":1789840001.55,"pose":{"lat":42.35983,"lon":-71.09211,"hdg":90},"mode":"IDLE","wp":1,"obstacle_mm":2314,"mission":"m-7","battery_pct":87},
+{"src":"node-01","t":1789840002,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":2,"mm":20},"tds":{"ppm":421,"trend":"steady"},"temp_c":18.4,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.85,"why":"2 of 6 rungs wet, dissolved solids steady"},"decided_at":1789840002,"decided_on":"device"},
+{"src":"unit-01","t":1789840002.05,"pose":{"lat":42.35983,"lon":-71.09211,"hdg":90},"mode":"IDLE","wp":1,"obstacle_mm":2378,"mission":"m-7","battery_pct":87},
+{"src":"unit-01","t":1789840002.55,"pose":{"lat":42.35983,"lon":-71.09211,"hdg":90},"mode":"IDLE","wp":1,"obstacle_mm":2400,"mission":"m-7","battery_pct":87},
+{"src":"node-01","t":1789840003,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":2,"mm":20},"tds":{"ppm":431,"trend":"rising"},"temp_c":18.3,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.91,"why":"2 of 6 rungs wet, dissolved solids rising"},"decided_at":1789840003,"decided_on":"device"},
+{"src":"brain-01","t":1789840003.05,"mission":"m-7","stage":"TRIAGED","route":null,"why":"triaging request against the node-01 hazard reading","rejected":[],"decided_on":"device"},
+{"src":"unit-01","t":1789840003.05,"pose":{"lat":42.35983,"lon":-71.09211,"hdg":90},"mode":"IDLE","wp":1,"obstacle_mm":2372,"mission":"m-7","battery_pct":87},
+{"src":"unit-01","t":1789840003.55,"pose":{"lat":42.35983,"lon":-71.09211,"hdg":90},"mode":"IDLE","wp":1,"obstacle_mm":2256,"mission":"m-7","battery_pct":87},
+{"src":"node-01","t":1789840004,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":2,"mm":20},"tds":{"ppm":444,"trend":"rising"},"temp_c":18.5,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.83,"why":"2 of 6 rungs wet, dissolved solids rising"},"decided_at":1789840004,"decided_on":"device"},
+{"src":"unit-01","t":1789840004.05,"pose":{"lat":42.35983,"lon":-71.09211,"hdg":90},"mode":"IDLE","wp":1,"obstacle_mm":2304,"mission":"m-7","battery_pct":87},
+{"src":"unit-01","t":1789840004.55,"pose":{"lat":42.35983,"lon":-71.09211,"hdg":90},"mode":"IDLE","wp":1,"obstacle_mm":2362,"mission":"m-7","battery_pct":87},
+{"src":"node-01","t":1789840005,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":2,"mm":20},"tds":{"ppm":463,"trend":"rising"},"temp_c":18.4,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.9,"why":"2 of 6 rungs wet, dissolved solids rising"},"decided_at":1789840005,"decided_on":"device"},
+{"src":"unit-01","t":1789840005.05,"pose":{"lat":42.35983,"lon":-71.09211,"hdg":90},"mode":"IDLE","wp":1,"obstacle_mm":2400,"mission":"m-7","battery_pct":87},
+{"src":"unit-01","t":1789840005.55,"pose":{"lat":42.35983,"lon":-71.09211,"hdg":90},"mode":"IDLE","wp":1,"obstacle_mm":2400,"mission":"m-7","battery_pct":87},
+{"src":"node-01","t":1789840006,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":2,"mm":20},"tds":{"ppm":478,"trend":"rising"},"temp_c":18.4,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.86,"why":"2 of 6 rungs wet, dissolved solids rising"},"decided_at":1789840006,"decided_on":"device"},
+{"src":"brain-01","t":1789840006.05,"mission":"m-7","stage":"DISPATCHED","route":{"id":"south-crossing","name":"south crossing","len_m":295},"why":"south crossing is 20 mm, within passable depth 40 mm, and shortest","rejected":[{"id":"north-bridge","name":"north bridge","reason":"north bridge 326 m, 31 m longer than the south crossing at 20 mm"},{"id":"lowland-loop","name":"lowland loop","reason":"lowland loop lies below the south crossing, so deeper than 20 mm, and no sensor covers it"}],"decided_on":"device"},
+{"src":"unit-01","t":1789840006.05,"pose":{"lat":42.35983,"lon":-71.09211,"hdg":90},"mode":"PLANNING","wp":1,"obstacle_mm":2337,"mission":"m-7","battery_pct":87},
+{"src":"unit-01","t":1789840006.55,"pose":{"lat":42.35983,"lon":-71.09211,"hdg":90},"mode":"PLANNING","wp":1,"obstacle_mm":2395,"mission":"m-7","battery_pct":87},
+{"src":"node-01","t":1789840007,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":2,"mm":20},"tds":{"ppm":508,"trend":"rising"},"temp_c":18.4,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.88,"why":"2 of 6 rungs wet, dissolved solids rising"},"decided_at":1789840007,"decided_on":"device"},
+{"src":"unit-01","t":1789840007.05,"pose":{"lat":42.35983,"lon":-71.09211,"hdg":90},"mode":"PLANNING","wp":1,"obstacle_mm":2329,"mission":"m-7","battery_pct":87},
+{"src":"unit-01","t":1789840007.55,"pose":{"lat":42.35983,"lon":-71.09211,"hdg":90},"mode":"PLANNING","wp":1,"obstacle_mm":2327,"mission":"m-7","battery_pct":87},
+{"src":"node-01","t":1789840008,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":2,"mm":20},"tds":{"ppm":530,"trend":"rising"},"temp_c":18.4,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.91,"why":"2 of 6 rungs wet, dissolved solids rising"},"decided_at":1789840008,"decided_on":"device"},
+{"src":"brain-01","t":1789840008.05,"mission":"m-7","stage":"EN_ROUTE","route":{"id":"south-crossing","name":"south crossing","len_m":295},"why":"south crossing is 20 mm, within passable depth 40 mm, and shortest","rejected":[{"id":"north-bridge","name":"north bridge","reason":"north bridge 326 m, 31 m longer than the south crossing at 20 mm"},{"id":"lowland-loop","name":"lowland loop","reason":"lowland loop lies below the south crossing, so deeper than 20 mm, and no sensor covers it"}],"decided_on":"device"},
+{"src":"unit-01","t":1789840008.05,"pose":{"lat":42.35983,"lon":-71.092106,"hdg":90},"mode":"DRIVING","wp":1,"obstacle_mm":2304,"mission":"m-7","battery_pct":87},
+{"src":"unit-01","t":1789840008.55,"pose":{"lat":42.35983,"lon":-71.092063,"hdg":90},"mode":"DRIVING","wp":1,"obstacle_mm":2129,"mission":"m-7","battery_pct":87},
+{"src":"node-01","t":1789840009,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":2,"mm":20},"tds":{"ppm":560,"trend":"rising"},"temp_c":18.3,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.88,"why":"2 of 6 rungs wet, dissolved solids rising"},"decided_at":1789840009,"decided_on":"device"},
+{"src":"unit-01","t":1789840009.05,"pose":{"lat":42.35983,"lon":-71.092021,"hdg":90},"mode":"DRIVING","wp":1,"obstacle_mm":1853,"mission":"m-7","battery_pct":87},
+{"src":"unit-01","t":1789840009.55,"pose":{"lat":42.35983,"lon":-71.091978,"hdg":90},"mode":"DRIVING","wp":1,"obstacle_mm":1896,"mission":"m-7","battery_pct":87},
+{"src":"node-01","t":1789840010,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":2,"mm":20},"tds":{"ppm":591,"trend":"rising"},"temp_c":18.3,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.89,"why":"2 of 6 rungs wet, dissolved solids rising"},"decided_at":1789840010,"decided_on":"device"},
+{"src":"unit-01","t":1789840010.05,"pose":{"lat":42.35983,"lon":-71.091936,"hdg":90},"mode":"DRIVING","wp":1,"obstacle_mm":1977,"mission":"m-7","battery_pct":87},
+{"src":"unit-01","t":1789840010.55,"pose":{"lat":42.35983,"lon":-71.091893,"hdg":90},"mode":"DRIVING","wp":1,"obstacle_mm":2096,"mission":"m-7","battery_pct":87},
+{"src":"node-01","t":1789840011,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":2,"mm":20},"tds":{"ppm":622,"trend":"rising"},"temp_c":18.4,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.92,"why":"2 of 6 rungs wet, dissolved solids rising"},"decided_at":1789840011,"decided_on":"device"},
+{"src":"unit-01","t":1789840011.05,"pose":{"lat":42.35983,"lon":-71.09185,"hdg":90},"mode":"DRIVING","wp":1,"obstacle_mm":2310,"mission":"m-7","battery_pct":87},
+{"src":"unit-01","t":1789840011.55,"pose":{"lat":42.359821,"lon":-71.09181,"hdg":110.2},"mode":"DRIVING","wp":2,"obstacle_mm":2316,"mission":"m-7","battery_pct":87},
+{"src":"node-01","t":1789840012,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":3,"mm":30},"tds":{"ppm":659,"trend":"rising"},"temp_c":18.4,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.85,"why":"3 of 6 rungs wet, dissolved solids rising"},"decided_at":1789840012,"decided_on":"device"},
+{"src":"unit-01","t":1789840012.05,"pose":{"lat":42.35981,"lon":-71.09177,"hdg":110.2},"mode":"DRIVING","wp":2,"obstacle_mm":2154,"mission":"m-7","battery_pct":87},
+{"src":"brain-01","t":1789840012.1,"mission":"m-7","stage":"EN_ROUTE","route":{"id":"south-crossing","name":"south crossing","len_m":295},"why":"south crossing is 30 mm, within passable depth 40 mm, and shortest","rejected":[{"id":"north-bridge","name":"north bridge","reason":"north bridge 326 m, 31 m longer than the south crossing at 30 mm"},{"id":"lowland-loop","name":"lowland loop","reason":"lowland loop lies below the south crossing, so deeper than 30 mm, and no sensor covers it"}],"decided_on":"device"},
+{"src":"unit-01","t":1789840012.55,"pose":{"lat":42.359799,"lon":-71.09173,"hdg":110.2},"mode":"DRIVING","wp":2,"obstacle_mm":2229,"mission":"m-7","battery_pct":87},
+{"src":"node-01","t":1789840013,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":3,"mm":30},"tds":{"ppm":685,"trend":"rising"},"temp_c":18.3,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.91,"why":"3 of 6 rungs wet, dissolved solids rising"},"decided_at":1789840013,"decided_on":"device"},
+{"src":"unit-01","t":1789840013.05,"pose":{"lat":42.359789,"lon":-71.09169,"hdg":110.2},"mode":"DRIVING","wp":2,"obstacle_mm":2192,"mission":"m-7","battery_pct":87},
+{"src":"unit-01","t":1789840013.55,"pose":{"lat":42.359778,"lon":-71.09165,"hdg":110.2},"mode":"DRIVING","wp":2,"obstacle_mm":2191,"mission":"m-7","battery_pct":87},
+{"src":"node-01","t":1789840014,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":3,"mm":30},"tds":{"ppm":722,"trend":"rising"},"temp_c":18.4,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.88,"why":"3 of 6 rungs wet, dissolved solids rising"},"decided_at":1789840014,"decided_on":"device"},
+{"src":"unit-01","t":1789840014.05,"pose":{"lat":42.359767,"lon":-71.09161,"hdg":110.2},"mode":"DRIVING","wp":2,"obstacle_mm":2316,"mission":"m-7","battery_pct":87},
+{"src":"unit-01","t":1789840014.55,"pose":{"lat":42.359756,"lon":-71.09157,"hdg":110.2},"mode":"DRIVING","wp":2,"obstacle_mm":2247,"mission":"m-7","battery_pct":87},
+{"src":"node-01","t":1789840015,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":3,"mm":30},"tds":{"ppm":757,"trend":"rising"},"temp_c":18.4,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.88,"why":"3 of 6 rungs wet, dissolved solids rising"},"decided_at":1789840015,"decided_on":"device"},
+{"src":"unit-01","t":1789840015.05,"pose":{"lat":42.359745,"lon":-71.091531,"hdg":110.2},"mode":"DRIVING","wp":2,"obstacle_mm":2304,"mission":"m-7","battery_pct":87},
+{"src":"unit-01","t":1789840015.55,"pose":{"lat":42.359734,"lon":-71.091491,"hdg":110.2},"mode":"DRIVING","wp":2,"obstacle_mm":2242,"mission":"m-7","battery_pct":87},
+{"src":"node-01","t":1789840016,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":3,"mm":30},"tds":{"ppm":798,"trend":"rising"},"temp_c":18.4,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.87,"why":"3 of 6 rungs wet, dissolved solids rising"},"decided_at":1789840016,"decided_on":"device"},
+{"src":"unit-01","t":1789840016.05,"pose":{"lat":42.359723,"lon":-71.091451,"hdg":110.2},"mode":"DRIVING","wp":2,"obstacle_mm":2273,"mission":"m-7","battery_pct":87},
+{"src":"brain-01","t":1789840016.15,"mission":"m-7","stage":"EN_ROUTE","route":{"id":"south-crossing","name":"south crossing","len_m":295},"why":"south crossing is 30 mm, within passable depth 40 mm, and shortest","rejected":[{"id":"north-bridge","name":"north bridge","reason":"north bridge 326 m, 31 m longer than the south crossing at 30 mm"},{"id":"lowland-loop","name":"lowland loop","reason":"lowland loop lies below the south crossing, so deeper than 30 mm, and no sensor covers it"}],"decided_on":"device"},
+{"src":"unit-01","t":1789840016.55,"pose":{"lat":42.359712,"lon":-71.091411,"hdg":110.2},"mode":"DRIVING","wp":2,"obstacle_mm":2360,"mission":"m-7","battery_pct":87},
+{"src":"node-01","t":1789840017,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":3,"mm":30},"tds":{"ppm":832,"trend":"rising"},"temp_c":18.4,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.91,"why":"3 of 6 rungs wet, dissolved solids rising"},"decided_at":1789840017,"decided_on":"device"},
+{"src":"unit-01","t":1789840017.05,"pose":{"lat":42.359703,"lon":-71.09137,"hdg":96.2},"mode":"DRIVING","wp":3,"obstacle_mm":2246,"mission":"m-7","battery_pct":87},
+{"src":"unit-01","t":1789840017.55,"pose":{"lat":42.3597,"lon":-71.091328,"hdg":96.2},"mode":"DRIVING","wp":3,"obstacle_mm":2087,"mission":"m-7","battery_pct":87},
+{"src":"node-01","t":1789840018,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":3,"mm":30},"tds":{"ppm":872,"trend":"rising"},"temp_c":18.3,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.83,"why":"3 of 6 rungs wet, dissolved solids rising"},"decided_at":1789840018,"decided_on":"device"},
+{"src":"unit-01","t":1789840018.05,"pose":{"lat":42.359697,"lon":-71.091286,"hdg":96.2},"mode":"DRIVING","wp":3,"obstacle_mm":2115,"mission":"m-7","battery_pct":87},
+{"src":"unit-01","t":1789840018.55,"pose":{"lat":42.359693,"lon":-71.091243,"hdg":96.2},"mode":"DRIVING","wp":3,"obstacle_mm":2113,"mission":"m-7","battery_pct":87},
+{"src":"node-01","t":1789840019,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":3,"mm":30},"tds":{"ppm":906,"trend":"rising"},"temp_c":18.3,"sound":{"event":"none","conf":0},"hazard":{"state":"CONTAMINATED","conf":0.82,"why":"3 of 6 rungs wet, dissolved solids 906 ppm and rising"},"decided_at":1789840019,"decided_on":"device"},
+{"src":"unit-01","t":1789840019.05,"pose":{"lat":42.35969,"lon":-71.091201,"hdg":96.2},"mode":"DRIVING","wp":3,"obstacle_mm":2193,"mission":"m-7","battery_pct":87},
+{"src":"unit-01","t":1789840019.55,"pose":{"lat":42.359686,"lon":-71.091159,"hdg":96.2},"mode":"DRIVING","wp":3,"obstacle_mm":2322,"mission":"m-7","battery_pct":87},
+{"src":"node-01","t":1789840020,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":4,"mm":40},"tds":{"ppm":932,"trend":"rising"},"temp_c":18.4,"sound":{"event":"rain","conf":0.67},"hazard":{"state":"CONTAMINATED","conf":0.85,"why":"4 of 6 rungs wet, dissolved solids 932 ppm and rising"},"decided_at":1789840020,"decided_on":"device"},
+{"src":"unit-01","t":1789840020.05,"pose":{"lat":42.359683,"lon":-71.091116,"hdg":96.2},"mode":"DRIVING","wp":3,"obstacle_mm":2317,"mission":"m-7","battery_pct":87},
+{"src":"brain-01","t":1789840020.2,"mission":"m-7","stage":"EN_ROUTE","route":{"id":"south-crossing","name":"south crossing","len_m":295},"why":"south crossing is contaminated at 939 ppm, but 40 mm is within passable depth and the payload is sealed","rejected":[{"id":"north-bridge","name":"north bridge","reason":"north bridge 326 m, 31 m longer than the south crossing at 40 mm"},{"id":"lowland-loop","name":"lowland loop","reason":"lowland loop lies below the south crossing, so deeper than 40 mm, and no sensor covers it"}],"decided_on":"device"},
+{"src":"unit-01","t":1789840020.55,"pose":{"lat":42.35968,"lon":-71.091074,"hdg":96.2},"mode":"DRIVING","wp":3,"obstacle_mm":2088,"mission":"m-7","battery_pct":87},
+{"src":"node-01","t":1789840021,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":4,"mm":40},"tds":{"ppm":975,"trend":"rising"},"temp_c":18.4,"sound":{"event":"rain","conf":0.72},"hazard":{"state":"CONTAMINATED","conf":0.82,"why":"4 of 6 rungs wet, dissolved solids 975 ppm and rising"},"decided_at":1789840021,"decided_on":"device"},
+{"src":"unit-01","t":1789840021.05,"pose":{"lat":42.359676,"lon":-71.091032,"hdg":96.2},"mode":"DRIVING","wp":3,"obstacle_mm":2181,"mission":"m-7","battery_pct":87},
+{"src":"unit-01","t":1789840021.55,"pose":{"lat":42.359673,"lon":-71.09099,"hdg":96.2},"mode":"DRIVING","wp":3,"obstacle_mm":2200,"mission":"m-7","battery_pct":87},
+{"src":"node-01","t":1789840022,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":4,"mm":40},"tds":{"ppm":1002,"trend":"rising"},"temp_c":18.4,"sound":{"event":"rain","conf":0.56},"hazard":{"state":"CONTAMINATED","conf":0.84,"why":"4 of 6 rungs wet, dissolved solids 1002 ppm and rising"},"decided_at":1789840022,"decided_on":"device"},
+{"src":"unit-01","t":1789840022.05,"pose":{"lat":42.359669,"lon":-71.090947,"hdg":96.2},"mode":"DRIVING","wp":3,"obstacle_mm":2030,"mission":"m-7","battery_pct":87},
+{"src":"unit-01","t":1789840022.55,"pose":{"lat":42.359666,"lon":-71.090905,"hdg":96.2},"mode":"DRIVING","wp":3,"obstacle_mm":2117,"mission":"m-7","battery_pct":87},
+{"src":"node-01","t":1789840023,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":4,"mm":40},"tds":{"ppm":1028,"trend":"rising"},"temp_c":18.4,"sound":{"event":"rain","conf":0.72},"hazard":{"state":"CONTAMINATED","conf":0.81,"why":"4 of 6 rungs wet, dissolved solids 1028 ppm and rising"},"decided_at":1789840023,"decided_on":"device"},
+{"src":"unit-01","t":1789840023.05,"pose":{"lat":42.359662,"lon":-71.090863,"hdg":96.2},"mode":"DRIVING","wp":3,"obstacle_mm":2124,"mission":"m-7","battery_pct":87},
+{"src":"unit-01","t":1789840023.55,"pose":{"lat":42.359659,"lon":-71.09082,"hdg":96.2},"mode":"DRIVING","wp":3,"obstacle_mm":2042,"mission":"m-7","battery_pct":87},
+{"src":"node-01","t":1789840024,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":4,"mm":40},"tds":{"ppm":1060,"trend":"rising"},"temp_c":18.3,"sound":{"event":"rain","conf":0.72},"hazard":{"state":"CONTAMINATED","conf":0.86,"why":"4 of 6 rungs wet, dissolved solids 1060 ppm and rising"},"decided_at":1789840024,"decided_on":"device"},
+{"src":"unit-01","t":1789840024.05,"pose":{"lat":42.359656,"lon":-71.090778,"hdg":96.2},"mode":"DRIVING","wp":3,"obstacle_mm":2293,"mission":"m-7","battery_pct":87},
+{"src":"brain-01","t":1789840024.25,"mission":"m-7","stage":"EN_ROUTE","route":{"id":"south-crossing","name":"south crossing","len_m":295},"why":"south crossing is contaminated at 1066 ppm, but 40 mm is within passable depth and the payload is sealed","rejected":[{"id":"north-bridge","name":"north bridge","reason":"north bridge 326 m, 31 m longer than the south crossing at 40 mm"},{"id":"lowland-loop","name":"lowland loop","reason":"lowland loop lies below the south crossing, so deeper than 40 mm, and no sensor covers it"}],"decided_on":"device"},
+{"src":"unit-01","t":1789840024.55,"pose":{"lat":42.359652,"lon":-71.090736,"hdg":96.2},"mode":"DRIVING","wp":3,"obstacle_mm":2329,"mission":"m-7","battery_pct":87},
+{"src":"node-01","t":1789840025,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":4,"mm":40},"tds":{"ppm":1085,"trend":"rising"},"temp_c":18.3,"sound":{"event":"rain","conf":0.68},"hazard":{"state":"CONTAMINATED","conf":0.85,"why":"4 of 6 rungs wet, dissolved solids 1085 ppm and rising"},"decided_at":1789840025,"decided_on":"device"},
+{"src":"unit-01","t":1789840025.05,"pose":{"lat":42.35965,"lon":-71.090693,"hdg":92.8},"mode":"DRIVING","wp":4,"obstacle_mm":2197,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840025.55,"pose":{"lat":42.359648,"lon":-71.090651,"hdg":92.8},"mode":"DRIVING","wp":4,"obstacle_mm":2320,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840026,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":4,"mm":40},"tds":{"ppm":1108,"trend":"rising"},"temp_c":18.3,"sound":{"event":"rain","conf":0.6},"hazard":{"state":"CONTAMINATED","conf":0.83,"why":"4 of 6 rungs wet, dissolved solids 1108 ppm and rising"},"decided_at":1789840026,"decided_on":"device"},
+{"src":"unit-01","t":1789840026.05,"pose":{"lat":42.359647,"lon":-71.090608,"hdg":92.8},"mode":"DRIVING","wp":4,"obstacle_mm":2277,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840026.55,"pose":{"lat":42.359645,"lon":-71.090566,"hdg":92.8},"mode":"DRIVING","wp":4,"obstacle_mm":2195,"mission":"m-7","battery_pct":86},
+{"src":"brain-01","t":1789840027,"mission":"m-7","stage":"EN_ROUTE","route":{"id":"north-bridge","name":"north bridge","len_m":326},"why":"south crossing is 50 mm deep at node-01; taking the bridge","rejected":[{"id":"south-crossing","name":"south crossing","reason":"south crossing 50 mm at node-01, exceeds passable depth 40 mm"},{"id":"lowland-loop","name":"lowland loop","reason":"lowland loop lies below the south crossing, so deeper than 50 mm, and no sensor covers it"}],"decided_on":"device"},
+{"src":"node-01","t":1789840027,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1127,"trend":"rising"},"temp_c":18.3,"sound":{"event":"rushing_water","conf":0.79},"hazard":{"state":"IMPASSABLE","conf":0.97,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840027,"decided_on":"device"},
+{"src":"unit-01","t":1789840027.05,"pose":{"lat":42.359644,"lon":-71.09054,"hdg":272.8},"mode":"REROUTING","wp":1,"obstacle_mm":2067,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840027.55,"pose":{"lat":42.359646,"lon":-71.090583,"hdg":272.8},"mode":"REROUTING","wp":1,"obstacle_mm":2044,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840028,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1148,"trend":"rising"},"temp_c":18.2,"sound":{"event":"rushing_water","conf":0.84},"hazard":{"state":"IMPASSABLE","conf":0.91,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840028,"decided_on":"device"},
+{"src":"unit-01","t":1789840028.05,"pose":{"lat":42.359647,"lon":-71.090625,"hdg":272.8},"mode":"REROUTING","wp":1,"obstacle_mm":1809,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840028.55,"pose":{"lat":42.359649,"lon":-71.090668,"hdg":272.8},"mode":"REROUTING","wp":1,"obstacle_mm":1865,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840029,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1159,"trend":"rising"},"temp_c":18.2,"sound":{"event":"rushing_water","conf":0.85},"hazard":{"state":"IMPASSABLE","conf":0.97,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840029,"decided_on":"device"},
+{"src":"unit-01","t":1789840029.05,"pose":{"lat":42.35965,"lon":-71.09071,"hdg":272.8},"mode":"REROUTING","wp":1,"obstacle_mm":1784,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840029.55,"pose":{"lat":42.359654,"lon":-71.090753,"hdg":276.2},"mode":"REROUTING","wp":2,"obstacle_mm":1820,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840030,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1168,"trend":"rising"},"temp_c":18.2,"sound":{"event":"rushing_water","conf":0.77},"hazard":{"state":"IMPASSABLE","conf":0.97,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840030,"decided_on":"device"},
+{"src":"unit-01","t":1789840030.05,"pose":{"lat":42.359657,"lon":-71.090795,"hdg":276.2},"mode":"REROUTING","wp":2,"obstacle_mm":1819,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840030.55,"pose":{"lat":42.35966,"lon":-71.090837,"hdg":276.2},"mode":"REROUTING","wp":2,"obstacle_mm":2004,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840031,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1177,"trend":"rising"},"temp_c":18.3,"sound":{"event":"rushing_water","conf":0.86},"hazard":{"state":"IMPASSABLE","conf":0.92,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840031,"decided_on":"device"},
+{"src":"brain-01","t":1789840031.05,"mission":"m-7","stage":"EN_ROUTE","route":{"id":"north-bridge","name":"north bridge","len_m":326},"why":"south crossing is 50 mm deep at node-01; taking the bridge","rejected":[{"id":"south-crossing","name":"south crossing","reason":"south crossing 50 mm at node-01, exceeds passable depth 40 mm"},{"id":"lowland-loop","name":"lowland loop","reason":"lowland loop lies below the south crossing, so deeper than 50 mm, and no sensor covers it"}],"decided_on":"device"},
+{"src":"unit-01","t":1789840031.05,"pose":{"lat":42.359664,"lon":-71.09088,"hdg":276.2},"mode":"DRIVING","wp":2,"obstacle_mm":2400,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840031.55,"pose":{"lat":42.359667,"lon":-71.090922,"hdg":276.2},"mode":"DRIVING","wp":2,"obstacle_mm":2287,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840032,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1178,"trend":"steady"},"temp_c":18.3,"sound":{"event":"rushing_water","conf":0.77},"hazard":{"state":"IMPASSABLE","conf":0.92,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840032,"decided_on":"device"},
+{"src":"unit-01","t":1789840032.05,"pose":{"lat":42.359671,"lon":-71.090964,"hdg":276.2},"mode":"DRIVING","wp":2,"obstacle_mm":2400,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840032.55,"pose":{"lat":42.359674,"lon":-71.091007,"hdg":276.2},"mode":"DRIVING","wp":2,"obstacle_mm":2392,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840033,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1182,"trend":"steady"},"temp_c":18.3,"sound":{"event":"rushing_water","conf":0.83},"hazard":{"state":"IMPASSABLE","conf":0.91,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840033,"decided_on":"device"},
+{"src":"unit-01","t":1789840033.05,"pose":{"lat":42.359677,"lon":-71.091049,"hdg":276.2},"mode":"DRIVING","wp":2,"obstacle_mm":2176,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840033.55,"pose":{"lat":42.359681,"lon":-71.091091,"hdg":276.2},"mode":"DRIVING","wp":2,"obstacle_mm":2100,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840034,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1184,"trend":"steady"},"temp_c":18.3,"sound":{"event":"rushing_water","conf":0.9},"hazard":{"state":"IMPASSABLE","conf":0.96,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840034,"decided_on":"device"},
+{"src":"unit-01","t":1789840034.05,"pose":{"lat":42.359684,"lon":-71.091133,"hdg":276.2},"mode":"DRIVING","wp":2,"obstacle_mm":1954,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840034.55,"pose":{"lat":42.359688,"lon":-71.091176,"hdg":276.2},"mode":"DRIVING","wp":2,"obstacle_mm":2271,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840035,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1180,"trend":"steady"},"temp_c":18.2,"sound":{"event":"rushing_water","conf":0.75},"hazard":{"state":"IMPASSABLE","conf":0.91,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840035,"decided_on":"device"},
+{"src":"unit-01","t":1789840035.05,"pose":{"lat":42.359691,"lon":-71.091218,"hdg":276.2},"mode":"DRIVING","wp":2,"obstacle_mm":2171,"mission":"m-7","battery_pct":86},
+{"src":"brain-01","t":1789840035.1,"mission":"m-7","stage":"EN_ROUTE","route":{"id":"north-bridge","name":"north bridge","len_m":326},"why":"south crossing is 50 mm deep at node-01; taking the bridge","rejected":[{"id":"south-crossing","name":"south crossing","reason":"south crossing 50 mm at node-01, exceeds passable depth 40 mm"},{"id":"lowland-loop","name":"lowland loop","reason":"lowland loop lies below the south crossing, so deeper than 50 mm, and no sensor covers it"}],"decided_on":"device"},
+{"src":"unit-01","t":1789840035.55,"pose":{"lat":42.359695,"lon":-71.09126,"hdg":276.2},"mode":"DRIVING","wp":2,"obstacle_mm":2219,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840036,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1182,"trend":"steady"},"temp_c":18.3,"sound":{"event":"rushing_water","conf":0.74},"hazard":{"state":"IMPASSABLE","conf":0.9,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840036,"decided_on":"device"},
+{"src":"unit-01","t":1789840036.05,"pose":{"lat":42.359698,"lon":-71.091303,"hdg":276.2},"mode":"DRIVING","wp":2,"obstacle_mm":2229,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840036.55,"pose":{"lat":42.359701,"lon":-71.091345,"hdg":276.2},"mode":"DRIVING","wp":2,"obstacle_mm":2199,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840037,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1181,"trend":"steady"},"temp_c":18.2,"sound":{"event":"rushing_water","conf":0.74},"hazard":{"state":"IMPASSABLE","conf":0.92,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840037,"decided_on":"device"},
+{"src":"unit-01","t":1789840037.05,"pose":{"lat":42.359706,"lon":-71.091387,"hdg":290.2},"mode":"DRIVING","wp":3,"obstacle_mm":2160,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840037.55,"pose":{"lat":42.359717,"lon":-71.091427,"hdg":290.2},"mode":"DRIVING","wp":3,"obstacle_mm":1977,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840038,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1175,"trend":"steady"},"temp_c":18.2,"sound":{"event":"rushing_water","conf":0.83},"hazard":{"state":"IMPASSABLE","conf":0.94,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840038,"decided_on":"device"},
+{"src":"unit-01","t":1789840038.05,"pose":{"lat":42.359728,"lon":-71.091467,"hdg":290.2},"mode":"DRIVING","wp":3,"obstacle_mm":2293,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840038.55,"pose":{"lat":42.359739,"lon":-71.091507,"hdg":290.2},"mode":"DRIVING","wp":3,"obstacle_mm":2400,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840039,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1179,"trend":"steady"},"temp_c":18.2,"sound":{"event":"rushing_water","conf":0.81},"hazard":{"state":"IMPASSABLE","conf":0.97,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840039,"decided_on":"device"},
+{"src":"unit-01","t":1789840039.05,"pose":{"lat":42.359749,"lon":-71.091547,"hdg":290.2},"mode":"DRIVING","wp":3,"obstacle_mm":2327,"mission":"m-7","battery_pct":86},
+{"src":"brain-01","t":1789840039.15,"mission":"m-7","stage":"EN_ROUTE","route":{"id":"north-bridge","name":"north bridge","len_m":326},"why":"south crossing is 50 mm deep at node-01; taking the bridge","rejected":[{"id":"south-crossing","name":"south crossing","reason":"south crossing 50 mm at node-01, exceeds passable depth 40 mm"},{"id":"lowland-loop","name":"lowland loop","reason":"lowland loop lies below the south crossing, so deeper than 50 mm, and no sensor covers it"}],"decided_on":"device"},
+{"src":"unit-01","t":1789840039.55,"pose":{"lat":42.35976,"lon":-71.091586,"hdg":290.2},"mode":"DRIVING","wp":3,"obstacle_mm":2266,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840040,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1184,"trend":"steady"},"temp_c":18.2,"sound":{"event":"rushing_water","conf":0.8},"hazard":{"state":"IMPASSABLE","conf":0.94,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840040,"decided_on":"device"},
+{"src":"unit-01","t":1789840040.05,"pose":{"lat":42.359771,"lon":-71.091626,"hdg":290.2},"mode":"DRIVING","wp":3,"obstacle_mm":2258,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840040.55,"pose":{"lat":42.359782,"lon":-71.091666,"hdg":290.2},"mode":"DRIVING","wp":3,"obstacle_mm":2177,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840041,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":6,"mm":60},"tds":{"ppm":1182,"trend":"steady"},"temp_c":18.2,"sound":{"event":"rushing_water","conf":0.83},"hazard":{"state":"IMPASSABLE","conf":0.96,"why":"6 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840041,"decided_on":"device"},
+{"src":"unit-01","t":1789840041.05,"pose":{"lat":42.359793,"lon":-71.091706,"hdg":290.2},"mode":"DRIVING","wp":3,"obstacle_mm":2124,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840041.55,"pose":{"lat":42.359804,"lon":-71.091746,"hdg":290.2},"mode":"DRIVING","wp":3,"obstacle_mm":2289,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840042,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":6,"mm":60},"tds":{"ppm":1185,"trend":"steady"},"temp_c":18.2,"sound":{"event":"rushing_water","conf":0.9},"hazard":{"state":"IMPASSABLE","conf":0.97,"why":"6 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840042,"decided_on":"device"},
+{"src":"unit-01","t":1789840042.05,"pose":{"lat":42.359815,"lon":-71.091786,"hdg":290.2},"mode":"DRIVING","wp":3,"obstacle_mm":2167,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840042.55,"pose":{"lat":42.359825,"lon":-71.091826,"hdg":290.2},"mode":"DRIVING","wp":3,"obstacle_mm":2324,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840043,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":6,"mm":60},"tds":{"ppm":1183,"trend":"steady"},"temp_c":18.2,"sound":{"event":"rushing_water","conf":0.78},"hazard":{"state":"IMPASSABLE","conf":0.93,"why":"6 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840043,"decided_on":"device"},
+{"src":"unit-01","t":1789840043.05,"pose":{"lat":42.359847,"lon":-71.091833,"hdg":21.8},"mode":"DRIVING","wp":4,"obstacle_mm":2338,"mission":"m-7","battery_pct":86},
+{"src":"brain-01","t":1789840043.2,"mission":"m-7","stage":"EN_ROUTE","route":{"id":"north-bridge","name":"north bridge","len_m":326},"why":"south crossing is 60 mm deep at node-01; taking the bridge","rejected":[{"id":"south-crossing","name":"south crossing","reason":"south crossing 60 mm at node-01, exceeds passable depth 40 mm"},{"id":"lowland-loop","name":"lowland loop","reason":"lowland loop lies below the south crossing, so deeper than 60 mm, and no sensor covers it"}],"decided_on":"device"},
+{"src":"unit-01","t":1789840043.55,"pose":{"lat":42.359876,"lon":-71.091817,"hdg":21.8},"mode":"DRIVING","wp":4,"obstacle_mm":2178,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840044,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":6,"mm":60},"tds":{"ppm":1181,"trend":"steady"},"temp_c":18.2,"sound":{"event":"rushing_water","conf":0.79},"hazard":{"state":"IMPASSABLE","conf":0.96,"why":"6 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840044,"decided_on":"device"},
+{"src":"unit-01","t":1789840044.05,"pose":{"lat":42.359905,"lon":-71.091802,"hdg":21.8},"mode":"DRIVING","wp":4,"obstacle_mm":1925,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840044.55,"pose":{"lat":42.359935,"lon":-71.091786,"hdg":21.8},"mode":"DRIVING","wp":4,"obstacle_mm":1905,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840045,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":6,"mm":60},"tds":{"ppm":1177,"trend":"steady"},"temp_c":18.2,"sound":{"event":"rushing_water","conf":0.84},"hazard":{"state":"IMPASSABLE","conf":0.96,"why":"6 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840045,"decided_on":"device"},
+{"src":"unit-01","t":1789840045.05,"pose":{"lat":42.359964,"lon":-71.09177,"hdg":21.8},"mode":"DRIVING","wp":4,"obstacle_mm":1978,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840045.55,"pose":{"lat":42.359993,"lon":-71.091754,"hdg":21.8},"mode":"DRIVING","wp":4,"obstacle_mm":1931,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840046,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":6,"mm":60},"tds":{"ppm":1178,"trend":"steady"},"temp_c":18.2,"sound":{"event":"rushing_water","conf":0.86},"hazard":{"state":"IMPASSABLE","conf":0.9,"why":"6 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840046,"decided_on":"device"},
+{"src":"unit-01","t":1789840046.05,"pose":{"lat":42.360022,"lon":-71.091738,"hdg":21.8},"mode":"DRIVING","wp":4,"obstacle_mm":1960,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840046.55,"pose":{"lat":42.360051,"lon":-71.091723,"hdg":21.8},"mode":"DRIVING","wp":4,"obstacle_mm":2110,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840047,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":6,"mm":60},"tds":{"ppm":1184,"trend":"steady"},"temp_c":18.3,"sound":{"event":"rushing_water","conf":0.79},"hazard":{"state":"IMPASSABLE","conf":0.95,"why":"6 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840047,"decided_on":"device"},
+{"src":"unit-01","t":1789840047.05,"pose":{"lat":42.360081,"lon":-71.091707,"hdg":21.8},"mode":"DRIVING","wp":4,"obstacle_mm":2092,"mission":"m-7","battery_pct":86},
+{"src":"brain-01","t":1789840047.25,"mission":"m-7","stage":"EN_ROUTE","route":{"id":"north-bridge","name":"north bridge","len_m":326},"why":"south crossing is 60 mm deep at node-01; taking the bridge","rejected":[{"id":"south-crossing","name":"south crossing","reason":"south crossing 60 mm at node-01, exceeds passable depth 40 mm"},{"id":"lowland-loop","name":"lowland loop","reason":"lowland loop lies below the south crossing, so deeper than 60 mm, and no sensor covers it"}],"decided_on":"device"},
+{"src":"unit-01","t":1789840047.55,"pose":{"lat":42.360102,"lon":-71.091682,"hdg":78},"mode":"DRIVING","wp":5,"obstacle_mm":2176,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840048,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":6,"mm":60},"tds":{"ppm":1179,"trend":"steady"},"temp_c":18.2,"sound":{"event":"rushing_water","conf":0.88},"hazard":{"state":"IMPASSABLE","conf":0.92,"why":"6 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840048,"decided_on":"device"},
+{"src":"unit-01","t":1789840048.05,"pose":{"lat":42.360108,"lon":-71.09164,"hdg":78},"mode":"DRIVING","wp":5,"obstacle_mm":2184,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840048.55,"pose":{"lat":42.360115,"lon":-71.091599,"hdg":78},"mode":"DRIVING","wp":5,"obstacle_mm":2197,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840049,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":6,"mm":60},"tds":{"ppm":1185,"trend":"steady"},"temp_c":18.2,"sound":{"event":"rushing_water","conf":0.78},"hazard":{"state":"IMPASSABLE","conf":0.93,"why":"6 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840049,"decided_on":"device"},
+{"src":"unit-01","t":1789840049.05,"pose":{"lat":42.360121,"lon":-71.091557,"hdg":78},"mode":"DRIVING","wp":5,"obstacle_mm":2038,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840049.55,"pose":{"lat":42.360128,"lon":-71.091515,"hdg":78},"mode":"DRIVING","wp":5,"obstacle_mm":1799,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840050,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":6,"mm":60},"tds":{"ppm":1177,"trend":"steady"},"temp_c":18.1,"sound":{"event":"rushing_water","conf":0.91},"hazard":{"state":"IMPASSABLE","conf":0.93,"why":"6 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840050,"decided_on":"device"},
+{"src":"unit-01","t":1789840050.05,"pose":{"lat":42.360134,"lon":-71.091474,"hdg":78},"mode":"DRIVING","wp":5,"obstacle_mm":1628,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840050.55,"pose":{"lat":42.360141,"lon":-71.091432,"hdg":78},"mode":"DRIVING","wp":5,"obstacle_mm":1538,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840051,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":6,"mm":60},"tds":{"ppm":1178,"trend":"steady"},"temp_c":18.2,"sound":{"event":"rushing_water","conf":0.9},"hazard":{"state":"IMPASSABLE","conf":0.92,"why":"6 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840051,"decided_on":"device"},
+{"src":"unit-01","t":1789840051.05,"pose":{"lat":42.360147,"lon":-71.091391,"hdg":78},"mode":"DRIVING","wp":5,"obstacle_mm":1559,"mission":"m-7","battery_pct":86},
+{"src":"brain-01","t":1789840051.3,"mission":"m-7","stage":"EN_ROUTE","route":{"id":"north-bridge","name":"north bridge","len_m":326},"why":"south crossing is 60 mm deep at node-01; taking the bridge","rejected":[{"id":"south-crossing","name":"south crossing","reason":"south crossing 60 mm at node-01, exceeds passable depth 40 mm"},{"id":"lowland-loop","name":"lowland loop","reason":"lowland loop lies below the south crossing, so deeper than 60 mm, and no sensor covers it"}],"decided_on":"device"},
+{"src":"unit-01","t":1789840051.55,"pose":{"lat":42.360154,"lon":-71.091349,"hdg":78},"mode":"DRIVING","wp":5,"obstacle_mm":1661,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840052,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":6,"mm":60},"tds":{"ppm":1182,"trend":"steady"},"temp_c":18.1,"sound":{"event":"rushing_water","conf":0.77},"hazard":{"state":"IMPASSABLE","conf":0.97,"why":"6 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840052,"decided_on":"device"},
+{"src":"unit-01","t":1789840052.05,"pose":{"lat":42.360161,"lon":-71.091307,"hdg":78},"mode":"DRIVING","wp":5,"obstacle_mm":1337,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840052.55,"pose":{"lat":42.360167,"lon":-71.091266,"hdg":78},"mode":"DRIVING","wp":5,"obstacle_mm":1161,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840053,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":6,"mm":60},"tds":{"ppm":1179,"trend":"steady"},"temp_c":18.1,"sound":{"event":"rushing_water","conf":0.86},"hazard":{"state":"IMPASSABLE","conf":0.91,"why":"6 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840053,"decided_on":"device"},
+{"src":"unit-01","t":1789840053.05,"pose":{"lat":42.360174,"lon":-71.091224,"hdg":78},"mode":"DRIVING","wp":5,"obstacle_mm":907,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840053.55,"pose":{"lat":42.36018,"lon":-71.091182,"hdg":78},"mode":"DRIVING","wp":5,"obstacle_mm":984,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840054,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":6,"mm":60},"tds":{"ppm":1182,"trend":"steady"},"temp_c":18.2,"sound":{"event":"rushing_water","conf":0.8},"hazard":{"state":"IMPASSABLE","conf":0.94,"why":"6 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840054,"decided_on":"device"},
+{"src":"unit-01","t":1789840054.05,"pose":{"lat":42.360187,"lon":-71.091141,"hdg":78},"mode":"DRIVING","wp":5,"obstacle_mm":963,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840054.55,"pose":{"lat":42.360193,"lon":-71.091099,"hdg":78},"mode":"DRIVING","wp":5,"obstacle_mm":1116,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840055,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":6,"mm":60},"tds":{"ppm":1178,"trend":"steady"},"temp_c":18.2,"sound":{"event":"rushing_water","conf":0.73},"hazard":{"state":"IMPASSABLE","conf":0.97,"why":"6 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840055,"decided_on":"device"},
+{"src":"unit-01","t":1789840055.05,"pose":{"lat":42.3602,"lon":-71.091058,"hdg":78},"mode":"DRIVING","wp":5,"obstacle_mm":945,"mission":"m-7","battery_pct":86},
+{"src":"brain-01","t":1789840055.35,"mission":"m-7","stage":"EN_ROUTE","route":{"id":"north-bridge","name":"north bridge","len_m":326},"why":"south crossing is 60 mm deep at node-01; taking the bridge","rejected":[{"id":"south-crossing","name":"south crossing","reason":"south crossing 60 mm at node-01, exceeds passable depth 40 mm"},{"id":"lowland-loop","name":"lowland loop","reason":"lowland loop lies below the south crossing, so deeper than 60 mm, and no sensor covers it"}],"decided_on":"device"},
+{"src":"unit-01","t":1789840055.55,"pose":{"lat":42.360206,"lon":-71.091016,"hdg":78},"mode":"DRIVING","wp":5,"obstacle_mm":709,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840056,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":6,"mm":60},"tds":{"ppm":1182,"trend":"steady"},"temp_c":18.1,"sound":{"event":"rushing_water","conf":0.9},"hazard":{"state":"IMPASSABLE","conf":0.92,"why":"6 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840056,"decided_on":"device"},
+{"src":"unit-01","t":1789840056.05,"pose":{"lat":42.360213,"lon":-71.090974,"hdg":78},"mode":"DRIVING","wp":5,"obstacle_mm":616,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840056.55,"pose":{"lat":42.360219,"lon":-71.090933,"hdg":78},"mode":"DRIVING","wp":5,"obstacle_mm":423,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840057,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1181,"trend":"steady"},"temp_c":18.2,"sound":{"event":"rushing_water","conf":0.8},"hazard":{"state":"IMPASSABLE","conf":0.98,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840057,"decided_on":"device"},
+{"src":"unit-01","t":1789840057.05,"pose":{"lat":42.360225,"lon":-71.090891,"hdg":90},"mode":"DRIVING","wp":6,"obstacle_mm":442,"mission":"m-7","battery_pct":86},
+{"src":"unit-01","t":1789840057.55,"pose":{"lat":42.360225,"lon":-71.090848,"hdg":90},"mode":"DRIVING","wp":6,"obstacle_mm":458,"mission":"m-7","battery_pct":86},
+{"src":"node-01","t":1789840058,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1177,"trend":"steady"},"temp_c":18.3,"sound":{"event":"rushing_water","conf":0.77},"hazard":{"state":"IMPASSABLE","conf":0.98,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840058,"decided_on":"device"},
+{"src":"unit-01","t":1789840058.05,"pose":{"lat":42.360225,"lon":-71.090806,"hdg":90},"mode":"DRIVING","wp":6,"obstacle_mm":626,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840058.55,"pose":{"lat":42.360225,"lon":-71.090763,"hdg":90},"mode":"DRIVING","wp":6,"obstacle_mm":664,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840059,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1166,"trend":"steady"},"temp_c":18.2,"sound":{"event":"rushing_water","conf":0.76},"hazard":{"state":"IMPASSABLE","conf":0.91,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840059,"decided_on":"device"},
+{"src":"unit-01","t":1789840059.05,"pose":{"lat":42.360225,"lon":-71.090721,"hdg":90},"mode":"DRIVING","wp":6,"obstacle_mm":816,"mission":"m-7","battery_pct":85},
+{"src":"brain-01","t":1789840059.4,"mission":"m-7","stage":"EN_ROUTE","route":{"id":"north-bridge","name":"north bridge","len_m":326},"why":"south crossing is 50 mm deep at node-01; taking the bridge","rejected":[{"id":"south-crossing","name":"south crossing","reason":"south crossing 50 mm at node-01, exceeds passable depth 40 mm"},{"id":"lowland-loop","name":"lowland loop","reason":"lowland loop lies below the south crossing, so deeper than 50 mm, and no sensor covers it"}],"decided_on":"device"},
+{"src":"unit-01","t":1789840059.55,"pose":{"lat":42.360225,"lon":-71.090678,"hdg":90},"mode":"DRIVING","wp":6,"obstacle_mm":853,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840060,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1161,"trend":"falling"},"temp_c":18.2,"sound":{"event":"rushing_water","conf":0.73},"hazard":{"state":"IMPASSABLE","conf":0.93,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840060,"decided_on":"device"},
+{"src":"unit-01","t":1789840060.05,"pose":{"lat":42.360225,"lon":-71.090636,"hdg":90},"mode":"DRIVING","wp":6,"obstacle_mm":960,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840060.55,"pose":{"lat":42.360225,"lon":-71.090593,"hdg":90},"mode":"DRIVING","wp":6,"obstacle_mm":1005,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840061,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1142,"trend":"falling"},"temp_c":18.2,"sound":{"event":"rushing_water","conf":0.83},"hazard":{"state":"IMPASSABLE","conf":0.95,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840061,"decided_on":"device"},
+{"src":"unit-01","t":1789840061.05,"pose":{"lat":42.360225,"lon":-71.090551,"hdg":90},"mode":"DRIVING","wp":6,"obstacle_mm":979,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840061.55,"pose":{"lat":42.360225,"lon":-71.090508,"hdg":90},"mode":"DRIVING","wp":6,"obstacle_mm":864,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840062,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1130,"trend":"falling"},"temp_c":18.1,"sound":{"event":"rushing_water","conf":0.92},"hazard":{"state":"IMPASSABLE","conf":0.94,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840062,"decided_on":"device"},
+{"src":"unit-01","t":1789840062.05,"pose":{"lat":42.360225,"lon":-71.090466,"hdg":90},"mode":"DRIVING","wp":6,"obstacle_mm":796,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840062.55,"pose":{"lat":42.360225,"lon":-71.090423,"hdg":90},"mode":"DRIVING","wp":6,"obstacle_mm":856,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840063,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1118,"trend":"falling"},"temp_c":18.1,"sound":{"event":"rushing_water","conf":0.91},"hazard":{"state":"IMPASSABLE","conf":0.91,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840063,"decided_on":"device"},
+{"src":"unit-01","t":1789840063.05,"pose":{"lat":42.360225,"lon":-71.09038,"hdg":90},"mode":"DRIVING","wp":6,"obstacle_mm":1096,"mission":"m-7","battery_pct":85},
+{"src":"brain-01","t":1789840063.45,"mission":"m-7","stage":"EN_ROUTE","route":{"id":"north-bridge","name":"north bridge","len_m":326},"why":"south crossing is 50 mm deep at node-01; taking the bridge","rejected":[{"id":"south-crossing","name":"south crossing","reason":"south crossing 50 mm at node-01, exceeds passable depth 40 mm"},{"id":"lowland-loop","name":"lowland loop","reason":"lowland loop lies below the south crossing, so deeper than 50 mm, and no sensor covers it"}],"decided_on":"device"},
+{"src":"unit-01","t":1789840063.55,"pose":{"lat":42.360225,"lon":-71.090338,"hdg":90},"mode":"DRIVING","wp":6,"obstacle_mm":961,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840064,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1102,"trend":"falling"},"temp_c":18.2,"sound":{"event":"rushing_water","conf":0.81},"hazard":{"state":"IMPASSABLE","conf":0.98,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840064,"decided_on":"device"},
+{"src":"unit-01","t":1789840064.05,"pose":{"lat":42.360225,"lon":-71.090295,"hdg":90},"mode":"DRIVING","wp":6,"obstacle_mm":996,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840064.55,"pose":{"lat":42.360225,"lon":-71.090253,"hdg":90},"mode":"DRIVING","wp":6,"obstacle_mm":991,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840065,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1080,"trend":"falling"},"temp_c":18.1,"sound":{"event":"rushing_water","conf":0.76},"hazard":{"state":"IMPASSABLE","conf":0.97,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840065,"decided_on":"device"},
+{"src":"unit-01","t":1789840065.05,"pose":{"lat":42.360225,"lon":-71.09021,"hdg":90},"mode":"DRIVING","wp":7,"obstacle_mm":1037,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840065.55,"pose":{"lat":42.360225,"lon":-71.090168,"hdg":90},"mode":"DRIVING","wp":7,"obstacle_mm":1130,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840066,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1063,"trend":"falling"},"temp_c":18,"sound":{"event":"rushing_water","conf":0.86},"hazard":{"state":"IMPASSABLE","conf":0.92,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840066,"decided_on":"device"},
+{"src":"unit-01","t":1789840066.05,"pose":{"lat":42.360225,"lon":-71.090125,"hdg":90},"mode":"DRIVING","wp":7,"obstacle_mm":1342,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840066.55,"pose":{"lat":42.360225,"lon":-71.090083,"hdg":90},"mode":"DRIVING","wp":7,"obstacle_mm":1340,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840067,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1036,"trend":"falling"},"temp_c":18.1,"sound":{"event":"rushing_water","conf":0.91},"hazard":{"state":"IMPASSABLE","conf":0.96,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840067,"decided_on":"device"},
+{"src":"unit-01","t":1789840067.05,"pose":{"lat":42.360225,"lon":-71.09004,"hdg":90},"mode":"DRIVING","wp":7,"obstacle_mm":1204,"mission":"m-7","battery_pct":85},
+{"src":"brain-01","t":1789840067.5,"mission":"m-7","stage":"EN_ROUTE","route":{"id":"north-bridge","name":"north bridge","len_m":326},"why":"south crossing is 50 mm deep at node-01; taking the bridge","rejected":[{"id":"south-crossing","name":"south crossing","reason":"south crossing 50 mm at node-01, exceeds passable depth 40 mm"},{"id":"lowland-loop","name":"lowland loop","reason":"lowland loop lies below the south crossing, so deeper than 50 mm, and no sensor covers it"}],"decided_on":"device"},
+{"src":"unit-01","t":1789840067.55,"pose":{"lat":42.360225,"lon":-71.089997,"hdg":90},"mode":"DRIVING","wp":7,"obstacle_mm":1155,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840068,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":5,"mm":50},"tds":{"ppm":1015,"trend":"falling"},"temp_c":18.1,"sound":{"event":"rushing_water","conf":0.77},"hazard":{"state":"IMPASSABLE","conf":0.94,"why":"5 of 6 rungs wet, rushing water heard, too deep to cross on foot"},"decided_at":1789840068,"decided_on":"device"},
+{"src":"unit-01","t":1789840068.05,"pose":{"lat":42.360225,"lon":-71.089955,"hdg":90},"mode":"DRIVING","wp":7,"obstacle_mm":907,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840068.55,"pose":{"lat":42.360225,"lon":-71.089912,"hdg":90},"mode":"DRIVING","wp":7,"obstacle_mm":993,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840069,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":4,"mm":40},"tds":{"ppm":989,"trend":"falling"},"temp_c":18.1,"sound":{"event":"rain","conf":0.7},"hazard":{"state":"CONTAMINATED","conf":0.88,"why":"4 of 6 rungs wet, dissolved solids 989 ppm and falling"},"decided_at":1789840069,"decided_on":"device"},
+{"src":"unit-01","t":1789840069.05,"pose":{"lat":42.360225,"lon":-71.08987,"hdg":90},"mode":"DRIVING","wp":7,"obstacle_mm":1280,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840069.55,"pose":{"lat":42.360225,"lon":-71.089827,"hdg":90},"mode":"DRIVING","wp":7,"obstacle_mm":1291,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840070,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":4,"mm":40},"tds":{"ppm":968,"trend":"falling"},"temp_c":18.2,"sound":{"event":"rain","conf":0.64},"hazard":{"state":"CONTAMINATED","conf":0.88,"why":"4 of 6 rungs wet, dissolved solids 968 ppm and falling"},"decided_at":1789840070,"decided_on":"device"},
+{"src":"unit-01","t":1789840070.05,"pose":{"lat":42.360225,"lon":-71.089785,"hdg":90},"mode":"DRIVING","wp":7,"obstacle_mm":1388,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840070.55,"pose":{"lat":42.360225,"lon":-71.089742,"hdg":90},"mode":"DRIVING","wp":7,"obstacle_mm":1450,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840071,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":4,"mm":40},"tds":{"ppm":941,"trend":"falling"},"temp_c":18.2,"sound":{"event":"rain","conf":0.64},"hazard":{"state":"CONTAMINATED","conf":0.9,"why":"4 of 6 rungs wet, dissolved solids 941 ppm and falling"},"decided_at":1789840071,"decided_on":"device"},
+{"src":"unit-01","t":1789840071.05,"pose":{"lat":42.360225,"lon":-71.0897,"hdg":90},"mode":"DRIVING","wp":7,"obstacle_mm":1320,"mission":"m-7","battery_pct":85},
+{"src":"brain-01","t":1789840071.55,"mission":"m-7","stage":"EN_ROUTE","route":{"id":"north-bridge","name":"north bridge","len_m":326},"why":"staying on the bridge route already under way","rejected":[{"id":"south-crossing","name":"south crossing","reason":"south crossing back to 40 mm, but turning around now costs more than finishing via the bridge"},{"id":"lowland-loop","name":"lowland loop","reason":"lowland loop lies below the south crossing, so deeper than 40 mm, and no sensor covers it"}],"decided_on":"device"},
+{"src":"unit-01","t":1789840071.55,"pose":{"lat":42.360225,"lon":-71.089657,"hdg":90},"mode":"DRIVING","wp":7,"obstacle_mm":1418,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840072,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":4,"mm":40},"tds":{"ppm":910,"trend":"falling"},"temp_c":18.1,"sound":{"event":"rain","conf":0.74},"hazard":{"state":"CONTAMINATED","conf":0.88,"why":"4 of 6 rungs wet, dissolved solids 910 ppm and falling"},"decided_at":1789840072,"decided_on":"device"},
+{"src":"unit-01","t":1789840072.05,"pose":{"lat":42.360225,"lon":-71.089615,"hdg":90},"mode":"DRIVING","wp":7,"obstacle_mm":1563,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840072.55,"pose":{"lat":42.360225,"lon":-71.089572,"hdg":90},"mode":"DRIVING","wp":7,"obstacle_mm":1712,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840073,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":4,"mm":40},"tds":{"ppm":878,"trend":"falling"},"temp_c":18,"sound":{"event":"rain","conf":0.57},"hazard":{"state":"SHALLOW_CROSSING","conf":0.9,"why":"4 of 6 rungs wet, dissolved solids falling"},"decided_at":1789840073,"decided_on":"device"},
+{"src":"unit-01","t":1789840073.05,"pose":{"lat":42.36022,"lon":-71.08953,"hdg":105.4},"mode":"DRIVING","wp":8,"obstacle_mm":1648,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840073.55,"pose":{"lat":42.360211,"lon":-71.089489,"hdg":105.4},"mode":"DRIVING","wp":8,"obstacle_mm":1637,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840074,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":4,"mm":40},"tds":{"ppm":858,"trend":"falling"},"temp_c":18.1,"sound":{"event":"rain","conf":0.57},"hazard":{"state":"SHALLOW_CROSSING","conf":0.84,"why":"4 of 6 rungs wet, dissolved solids falling"},"decided_at":1789840074,"decided_on":"device"},
+{"src":"unit-01","t":1789840074.05,"pose":{"lat":42.360203,"lon":-71.089448,"hdg":105.4},"mode":"DRIVING","wp":8,"obstacle_mm":1475,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840074.55,"pose":{"lat":42.360195,"lon":-71.089407,"hdg":105.4},"mode":"DRIVING","wp":8,"obstacle_mm":1562,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840075,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":4,"mm":40},"tds":{"ppm":826,"trend":"falling"},"temp_c":18.1,"sound":{"event":"rain","conf":0.6},"hazard":{"state":"SHALLOW_CROSSING","conf":0.84,"why":"4 of 6 rungs wet, dissolved solids falling"},"decided_at":1789840075,"decided_on":"device"},
+{"src":"unit-01","t":1789840075.05,"pose":{"lat":42.360186,"lon":-71.089366,"hdg":105.4},"mode":"DRIVING","wp":8,"obstacle_mm":1490,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840075.55,"pose":{"lat":42.360178,"lon":-71.089325,"hdg":105.4},"mode":"DRIVING","wp":8,"obstacle_mm":1320,"mission":"m-7","battery_pct":85},
+{"src":"brain-01","t":1789840075.6,"mission":"m-7","stage":"EN_ROUTE","route":{"id":"north-bridge","name":"north bridge","len_m":326},"why":"staying on the bridge route already under way","rejected":[{"id":"south-crossing","name":"south crossing","reason":"south crossing back to 40 mm, but turning around now costs more than finishing via the bridge"},{"id":"lowland-loop","name":"lowland loop","reason":"lowland loop lies below the south crossing, so deeper than 40 mm, and no sensor covers it"}],"decided_on":"device"},
+{"src":"node-01","t":1789840076,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":4,"mm":40},"tds":{"ppm":793,"trend":"falling"},"temp_c":18,"sound":{"event":"rain","conf":0.6},"hazard":{"state":"SHALLOW_CROSSING","conf":0.88,"why":"4 of 6 rungs wet, dissolved solids falling"},"decided_at":1789840076,"decided_on":"device"},
+{"src":"unit-01","t":1789840076.05,"pose":{"lat":42.36017,"lon":-71.089284,"hdg":105.4},"mode":"DRIVING","wp":8,"obstacle_mm":1168,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840076.55,"pose":{"lat":42.360161,"lon":-71.089243,"hdg":105.4},"mode":"DRIVING","wp":8,"obstacle_mm":1121,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840077,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":4,"mm":40},"tds":{"ppm":771,"trend":"falling"},"temp_c":18,"sound":{"event":"rain","conf":0.63},"hazard":{"state":"SHALLOW_CROSSING","conf":0.83,"why":"4 of 6 rungs wet, dissolved solids falling"},"decided_at":1789840077,"decided_on":"device"},
+{"src":"unit-01","t":1789840077.05,"pose":{"lat":42.360153,"lon":-71.089202,"hdg":105.4},"mode":"DRIVING","wp":8,"obstacle_mm":996,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840077.55,"pose":{"lat":42.360145,"lon":-71.089161,"hdg":105.4},"mode":"DRIVING","wp":8,"obstacle_mm":860,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840078,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":4,"mm":40},"tds":{"ppm":736,"trend":"falling"},"temp_c":18.2,"sound":{"event":"rain","conf":0.64},"hazard":{"state":"SHALLOW_CROSSING","conf":0.92,"why":"4 of 6 rungs wet, dissolved solids falling"},"decided_at":1789840078,"decided_on":"device"},
+{"src":"unit-01","t":1789840078.05,"pose":{"lat":42.360136,"lon":-71.08912,"hdg":105.4},"mode":"DRIVING","wp":8,"obstacle_mm":833,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840078.55,"pose":{"lat":42.360128,"lon":-71.089079,"hdg":105.4},"mode":"DRIVING","wp":8,"obstacle_mm":1103,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840079,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":4,"mm":40},"tds":{"ppm":707,"trend":"falling"},"temp_c":18.1,"sound":{"event":"rain","conf":0.73},"hazard":{"state":"SHALLOW_CROSSING","conf":0.89,"why":"4 of 6 rungs wet, dissolved solids falling"},"decided_at":1789840079,"decided_on":"device"},
+{"src":"unit-01","t":1789840079.05,"pose":{"lat":42.36012,"lon":-71.089038,"hdg":105.4},"mode":"DRIVING","wp":8,"obstacle_mm":985,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840079.55,"pose":{"lat":42.360111,"lon":-71.088997,"hdg":105.4},"mode":"DRIVING","wp":8,"obstacle_mm":1027,"mission":"m-7","battery_pct":85},
+{"src":"brain-01","t":1789840079.65,"mission":"m-7","stage":"EN_ROUTE","route":{"id":"north-bridge","name":"north bridge","len_m":326},"why":"staying on the bridge route already under way","rejected":[{"id":"south-crossing","name":"south crossing","reason":"south crossing back to 40 mm, but turning around now costs more than finishing via the bridge"},{"id":"lowland-loop","name":"lowland loop","reason":"lowland loop lies below the south crossing, so deeper than 40 mm, and no sensor covers it"}],"decided_on":"device"},
+{"src":"node-01","t":1789840080,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":4,"mm":40},"tds":{"ppm":681,"trend":"falling"},"temp_c":18.1,"sound":{"event":"rain","conf":0.62},"hazard":{"state":"SHALLOW_CROSSING","conf":0.91,"why":"4 of 6 rungs wet, dissolved solids falling"},"decided_at":1789840080,"decided_on":"device"},
+{"src":"unit-01","t":1789840080.05,"pose":{"lat":42.360103,"lon":-71.088956,"hdg":105.4},"mode":"DRIVING","wp":8,"obstacle_mm":868,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840080.55,"pose":{"lat":42.360094,"lon":-71.088915,"hdg":105.4},"mode":"DRIVING","wp":8,"obstacle_mm":554,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840081,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":3,"mm":30},"tds":{"ppm":655,"trend":"falling"},"temp_c":18.1,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.83,"why":"3 of 6 rungs wet, dissolved solids falling"},"decided_at":1789840081,"decided_on":"device"},
+{"src":"unit-01","t":1789840081.05,"pose":{"lat":42.360086,"lon":-71.088874,"hdg":105.4},"mode":"DRIVING","wp":8,"obstacle_mm":750,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840081.55,"pose":{"lat":42.360071,"lon":-71.088839,"hdg":139.8},"mode":"DRIVING","wp":9,"obstacle_mm":602,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840082,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":3,"mm":30},"tds":{"ppm":626,"trend":"falling"},"temp_c":18,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.83,"why":"3 of 6 rungs wet, dissolved solids falling"},"decided_at":1789840082,"decided_on":"device"},
+{"src":"unit-01","t":1789840082.05,"pose":{"lat":42.360047,"lon":-71.088812,"hdg":139.8},"mode":"DRIVING","wp":9,"obstacle_mm":515,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840082.55,"pose":{"lat":42.360023,"lon":-71.088784,"hdg":139.8},"mode":"DRIVING","wp":9,"obstacle_mm":533,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840083,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":3,"mm":30},"tds":{"ppm":600,"trend":"falling"},"temp_c":18,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.91,"why":"3 of 6 rungs wet, dissolved solids falling"},"decided_at":1789840083,"decided_on":"device"},
+{"src":"unit-01","t":1789840083.05,"pose":{"lat":42.359999,"lon":-71.088757,"hdg":139.8},"mode":"DRIVING","wp":9,"obstacle_mm":431,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840083.55,"pose":{"lat":42.359975,"lon":-71.088729,"hdg":139.8},"mode":"DRIVING","wp":9,"obstacle_mm":449,"mission":"m-7","battery_pct":85},
+{"src":"brain-01","t":1789840083.7,"mission":"m-7","stage":"EN_ROUTE","route":{"id":"north-bridge","name":"north bridge","len_m":326},"why":"staying on the bridge route already under way","rejected":[{"id":"south-crossing","name":"south crossing","reason":"south crossing back to 30 mm, but turning around now costs more than finishing via the bridge"},{"id":"lowland-loop","name":"lowland loop","reason":"lowland loop lies below the south crossing, so deeper than 30 mm, and no sensor covers it"}],"decided_on":"device"},
+{"src":"node-01","t":1789840084,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":3,"mm":30},"tds":{"ppm":581,"trend":"falling"},"temp_c":18.1,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.92,"why":"3 of 6 rungs wet, dissolved solids falling"},"decided_at":1789840084,"decided_on":"device"},
+{"src":"unit-01","t":1789840084.05,"pose":{"lat":42.359951,"lon":-71.088702,"hdg":139.8},"mode":"DRIVING","wp":9,"obstacle_mm":523,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840084.55,"pose":{"lat":42.359927,"lon":-71.088674,"hdg":139.8},"mode":"DRIVING","wp":9,"obstacle_mm":607,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840085,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":3,"mm":30},"tds":{"ppm":558,"trend":"falling"},"temp_c":18.1,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.87,"why":"3 of 6 rungs wet, dissolved solids falling"},"decided_at":1789840085,"decided_on":"device"},
+{"src":"unit-01","t":1789840085.05,"pose":{"lat":42.359903,"lon":-71.088647,"hdg":139.8},"mode":"DRIVING","wp":9,"obstacle_mm":581,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840085.55,"pose":{"lat":42.359879,"lon":-71.088619,"hdg":139.8},"mode":"DRIVING","wp":9,"obstacle_mm":493,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840086,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":3,"mm":30},"tds":{"ppm":528,"trend":"falling"},"temp_c":18.1,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.88,"why":"3 of 6 rungs wet, dissolved solids falling"},"decided_at":1789840086,"decided_on":"device"},
+{"src":"unit-01","t":1789840086.05,"pose":{"lat":42.359855,"lon":-71.088592,"hdg":139.8},"mode":"DRIVING","wp":9,"obstacle_mm":584,"mission":"m-7","battery_pct":85},
+{"src":"brain-01","t":1789840086.25,"mission":"m-7","stage":"DELIVERED","route":{"id":"north-bridge","name":"north bridge","len_m":326},"why":"delivered to evac point via north bridge","rejected":[{"id":"south-crossing","name":"south crossing","reason":"south crossing back to 30 mm, but turning around now costs more than finishing via the bridge"},{"id":"lowland-loop","name":"lowland loop","reason":"lowland loop lies below the south crossing, so deeper than 30 mm, and no sensor covers it"}],"decided_on":"device"},
+{"src":"unit-01","t":1789840086.55,"pose":{"lat":42.359848,"lon":-71.088584,"hdg":139.8},"mode":"ARRIVED","wp":9,"obstacle_mm":717,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840087,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":3,"mm":30},"tds":{"ppm":513,"trend":"falling"},"temp_c":18.1,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.87,"why":"3 of 6 rungs wet, dissolved solids falling"},"decided_at":1789840087,"decided_on":"device"},
+{"src":"unit-01","t":1789840087.05,"pose":{"lat":42.359848,"lon":-71.088584,"hdg":139.8},"mode":"ARRIVED","wp":9,"obstacle_mm":776,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840087.55,"pose":{"lat":42.359848,"lon":-71.088584,"hdg":139.8},"mode":"ARRIVED","wp":9,"obstacle_mm":734,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840088,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":3,"mm":30},"tds":{"ppm":493,"trend":"falling"},"temp_c":18,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.84,"why":"3 of 6 rungs wet, dissolved solids falling"},"decided_at":1789840088,"decided_on":"device"},
+{"src":"unit-01","t":1789840088.05,"pose":{"lat":42.359848,"lon":-71.088584,"hdg":139.8},"mode":"ARRIVED","wp":9,"obstacle_mm":439,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840088.55,"pose":{"lat":42.359848,"lon":-71.088584,"hdg":139.8},"mode":"ARRIVED","wp":9,"obstacle_mm":591,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840089,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":3,"mm":30},"tds":{"ppm":472,"trend":"falling"},"temp_c":18.1,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.92,"why":"3 of 6 rungs wet, dissolved solids falling"},"decided_at":1789840089,"decided_on":"device"},
+{"src":"unit-01","t":1789840089.05,"pose":{"lat":42.359848,"lon":-71.088584,"hdg":139.8},"mode":"ARRIVED","wp":9,"obstacle_mm":758,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840089.55,"pose":{"lat":42.359848,"lon":-71.088584,"hdg":139.8},"mode":"ARRIVED","wp":9,"obstacle_mm":727,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840090,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":3,"mm":30},"tds":{"ppm":460,"trend":"falling"},"temp_c":18.1,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.87,"why":"3 of 6 rungs wet, dissolved solids falling"},"decided_at":1789840090,"decided_on":"device"},
+{"src":"unit-01","t":1789840090.05,"pose":{"lat":42.359848,"lon":-71.088584,"hdg":139.8},"mode":"ARRIVED","wp":9,"obstacle_mm":631,"mission":"m-7","battery_pct":85},
+{"src":"brain-01","t":1789840090.3,"mission":"m-7","stage":"DELIVERED","route":{"id":"north-bridge","name":"north bridge","len_m":326},"why":"delivered to evac point via north bridge","rejected":[{"id":"south-crossing","name":"south crossing","reason":"south crossing back to 30 mm, but turning around now costs more than finishing via the bridge"},{"id":"lowland-loop","name":"lowland loop","reason":"lowland loop lies below the south crossing, so deeper than 30 mm, and no sensor covers it"}],"decided_on":"device"},
+{"src":"unit-01","t":1789840090.55,"pose":{"lat":42.359848,"lon":-71.088584,"hdg":139.8},"mode":"ARRIVED","wp":9,"obstacle_mm":740,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840091,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":2,"mm":20},"tds":{"ppm":444,"trend":"falling"},"temp_c":18,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.88,"why":"2 of 6 rungs wet, dissolved solids falling"},"decided_at":1789840091,"decided_on":"device"},
+{"src":"unit-01","t":1789840091.05,"pose":{"lat":42.359848,"lon":-71.088584,"hdg":139.8},"mode":"ARRIVED","wp":9,"obstacle_mm":681,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840091.55,"pose":{"lat":42.359848,"lon":-71.088584,"hdg":139.8},"mode":"ARRIVED","wp":9,"obstacle_mm":515,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840092,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":2,"mm":20},"tds":{"ppm":433,"trend":"falling"},"temp_c":18.1,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.87,"why":"2 of 6 rungs wet, dissolved solids falling"},"decided_at":1789840092,"decided_on":"device"},
+{"src":"unit-01","t":1789840092.05,"pose":{"lat":42.359848,"lon":-71.088584,"hdg":139.8},"mode":"ARRIVED","wp":9,"obstacle_mm":679,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840092.55,"pose":{"lat":42.359848,"lon":-71.088584,"hdg":139.8},"mode":"ARRIVED","wp":9,"obstacle_mm":591,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840093,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":2,"mm":20},"tds":{"ppm":423,"trend":"falling"},"temp_c":18,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.84,"why":"2 of 6 rungs wet, dissolved solids falling"},"decided_at":1789840093,"decided_on":"device"},
+{"src":"unit-01","t":1789840093.05,"pose":{"lat":42.359848,"lon":-71.088584,"hdg":139.8},"mode":"ARRIVED","wp":9,"obstacle_mm":632,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840093.55,"pose":{"lat":42.359848,"lon":-71.088584,"hdg":139.8},"mode":"ARRIVED","wp":9,"obstacle_mm":874,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840094,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":2,"mm":20},"tds":{"ppm":416,"trend":"falling"},"temp_c":18.1,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.86,"why":"2 of 6 rungs wet, dissolved solids falling"},"decided_at":1789840094,"decided_on":"device"},
+{"src":"unit-01","t":1789840094.05,"pose":{"lat":42.359848,"lon":-71.088584,"hdg":139.8},"mode":"ARRIVED","wp":9,"obstacle_mm":1036,"mission":"m-7","battery_pct":85},
+{"src":"brain-01","t":1789840094.35,"mission":"m-7","stage":"DELIVERED","route":{"id":"north-bridge","name":"north bridge","len_m":326},"why":"delivered to evac point via north bridge","rejected":[{"id":"south-crossing","name":"south crossing","reason":"south crossing back to 30 mm, but turning around now costs more than finishing via the bridge"},{"id":"lowland-loop","name":"lowland loop","reason":"lowland loop lies below the south crossing, so deeper than 30 mm, and no sensor covers it"}],"decided_on":"device"},
+{"src":"unit-01","t":1789840094.55,"pose":{"lat":42.359848,"lon":-71.088584,"hdg":139.8},"mode":"ARRIVED","wp":9,"obstacle_mm":1021,"mission":"m-7","battery_pct":85},
+{"src":"node-01","t":1789840095,"link":{"uplink":true,"inference":"local"},"water":{"rungs":6,"wet":2,"mm":20},"tds":{"ppm":416,"trend":"steady"},"temp_c":18,"sound":{"event":"none","conf":0},"hazard":{"state":"SHALLOW_CROSSING","conf":0.88,"why":"2 of 6 rungs wet, dissolved solids steady"},"decided_at":1789840095,"decided_on":"device"},
+{"src":"unit-01","t":1789840095.05,"pose":{"lat":42.359848,"lon":-71.088584,"hdg":139.8},"mode":"ARRIVED","wp":9,"obstacle_mm":887,"mission":"m-7","battery_pct":85},
+{"src":"unit-01","t":1789840095.55,"pose":{"lat":42.359848,"lon":-71.088584,"hdg":139.8},"mode":"ARRIVED","wp":9,"obstacle_mm":542,"mission":"m-7","battery_pct":85}
+]</script>
+
+<script>
+(function () {
+'use strict';
+const SIM = window.TikbalangSim;
+const SITE = SIM.SITE;
+const qs = new URLSearchParams(location.search);
+const WS_URL = qs.get('ws') || `ws://${location.hostname || 'localhost'}:8765`;
+const CLOUD_RTT_MS = 380;     // central panel sees frames one cloud round trip later
+const STALE_MS = 6000;        // no decision for this long = the sun stops
+const STAGES = ['REQUESTED', 'TRIAGED', 'DISPATCHED', 'EN_ROUTE', 'DELIVERED'];
+const MODE_STAGE = { IDLE: 'REQUESTED', TRIAGE: 'TRIAGED', PLANNING: 'DISPATCHED', DRIVING: 'EN_ROUTE', REROUTING: 'EN_ROUTE', DELIVERING: 'EN_ROUTE', ARRIVED: 'DELIVERED', DELIVERED: 'DELIVERED' };
+const C = { pearl: '#F2EADF', gold: '#FCD116', teal: '#1C7982', tealInk: '#86CBD0', crimson: '#CE1126', ground: '#121110' };
+const pearl = a => `rgba(242,234,223,${a})`;
+const FONT = '"IBM Plex Sans", system-ui, sans-serif';
+
+const mq = matchMedia('(prefers-reduced-motion: reduce)');
+let reduced = mq.matches;
+mq.addEventListener ? mq.addEventListener('change', e => { reduced = e.matches; }) : mq.addListener(e => { reduced = e.matches; });
+
+const state = { source: null, cut: false, cutAt: 0 };
+const $ = id => document.getElementById(id);
+
+/* ---------------- panels ---------------- */
+function buildPanel(key, title, sub) {
+  const el = $('p-' + key);
+  el.append($('panelTpl').content.cloneNode(true));
+  const q = s => el.querySelector(s);
+  q('.pname').textContent = title;
+  q('.psub').textContent = sub;
+  return {
+    key, el,
+    dom: {
+      sun: q('.psun'), pstate: q('.pstate'),
+      hazard: q('.hazard'), hzLabel: q('.hz-label'), word: q('.hz-word'), why: q('.hz-why'), meta: q('.hz-meta'),
+      gauge: q('.gauge'), wWet: q('.w-wet'), wMm: q('.w-mm'), tds: q('.w-tds'),
+      map: q('.mapc'), boSub: q('.bo-sub')
+    },
+    frozen: false, sinceCut: 0
+  };
+}
+function resetPanel(p) {
+  Object.assign(p, {
+    node: null, unit: null, disp: null, nodeAt: 0, unitAt: 0, dispAt: 0, lastFrame: 0, lastDecision: 0, pulseAt: -1e9,
+    rot: p.rot || 0, phase: p.phase || 0, trail: [], plan: null, committed: null,
+    routeId: null, routeDrawStart: 0, pose: null, wet: { from: 0, to: 0, t0: 0 }, dirty: true
+  });
+}
+const P = {
+  central: buildPanel('central', 'Central dispatch', 'Decides in the cloud. Needs the uplink.'),
+  edge: buildPanel('edge', 'Edge autonomy', 'Decides on node-01 and the GX10. No cloud.')
+};
+resetPanel(P.central); resetPanel(P.edge);
+
+// Real shell is never uniform: nudge each pane's opacity a little.
+(function varyPanes() {
+  let seed = 20260919;
+  const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
+  document.querySelectorAll('.pane').forEach(el => el.style.setProperty('--a', (0.035 + rnd() * 0.015).toFixed(3)));
+})();
+
+/* ---------------- ingest ---------------- */
+function kind(f) {
+  if (f.hazard || f.water) return 'node';
+  if (f.pose) return 'unit';
+  if (f.stage || f.route !== undefined || f.rejected) return 'dispatch';
+  return 'other';
+}
+function ingest(f) {
+  if (!f || typeof f !== 'object' || Array.isArray(f)) return;
+  tailPush(f);
+  applyFrame(P.edge, f);
+  if (!state.cut) setTimeout(() => { if (!state.cut) applyFrame(P.central, f); }, CLOUD_RTT_MS);
+}
+function decision(p, now) {
+  p.lastDecision = now; p.pulseAt = now;
+  if (state.cut && p.key === 'edge') p.sinceCut++;
+}
+function curWet(p, now) {
+  const w = p.wet; if (reduced) return w.to;
+  const k = Math.min(1, (now - w.t0) / 450), e = 1 - Math.pow(1 - k, 3);
+  return w.from + (w.to - w.from) * e;
+}
+function curPose(p, now) {
+  if (!p.pose) return null;
+  const { from, to, t0, dur } = p.pose;
+  const k = reduced ? 1 : Math.min(1, (now - t0) / dur);
+  const dh = ((to.hdg - from.hdg + 540) % 360) - 180;
+  return { x: from.x + (to.x - from.x) * k, y: from.y + (to.y - from.y) * k, hdg: from.hdg + dh * k };
+}
+function applyFrame(p, f) {
+  const now = performance.now();
+  p.lastFrame = now;
+  const k = kind(f);
+  if (k === 'node') {
+    const wet = f.water && Number.isFinite(f.water.wet) ? f.water.wet : 0;
+    if (!p.node || (p.node.water && p.node.water.wet) !== wet) p.wet = { from: curWet(p, now), to: wet, t0: now };
+    p.node = f; p.nodeAt = now; decision(p, now);
+  } else if (k === 'unit') {
+    if (!f.pose || !Number.isFinite(f.pose.lat) || !Number.isFinite(f.pose.lon)) return;
+    if (p.unit && p.unit.mission !== f.mission) p.trail = [];
+    const xy = SIM.toXY(f.pose.lat, f.pose.lon), to = { x: xy.x, y: xy.y, hdg: +f.pose.hdg || 0 };
+    const from = curPose(p, now) || to;
+    const dur = p.unitAt ? Math.min(700, Math.max(40, now - p.unitAt)) : 1;
+    p.pose = { from, to, t0: now, dur };
+    p.unit = f; p.unitAt = now;
+    const last = p.trail[p.trail.length - 1];
+    if (!last || Math.hypot(last.x - xy.x, last.y - xy.y) > 0.8) { p.trail.push(xy); if (p.trail.length > 700) p.trail.shift(); }
+  } else if (k === 'dispatch') {
+    p.disp = f; p.dispAt = now; decision(p, now);
+  } else return;
+  p.dirty = true;
+}
+
+/* ---------------- plan (brain frame, or derived) ---------------- */
+function computePlan(p) {
+  if (p.disp) {
+    const d = p.disp;
+    return { stage: d.stage, route: d.route || null, rejected: Array.isArray(d.rejected) ? d.rejected : [], why: d.why || '',
+      mission: d.mission, from: `from ${d.src || 'brain'} · on ${d.decided_on || 'device'}` };
+  }
+  if (!p.node && !p.unit) return null;
+  const moving = p.unit && /DRIV|REROUT/.test(p.unit.mode || '');
+  const pl = p.node ? SIM.plan(p.node, moving ? p.committed : null, false) : null;
+  if (pl) p.committed = pl.route.id;
+  const stage = p.unit ? (MODE_STAGE[p.unit.mode] || null) : null;
+  return { stage, route: pl ? pl.route : null, rejected: pl ? pl.rejected : [], why: pl ? pl.why : '',
+    mission: p.unit && p.unit.mission, from: `derived here from ${p.node ? p.node.src : 'node'}` };
+}
+
+/* ---------------- DOM render ---------------- */
+function sourceHint() {
+  if (state.source === 'live') return `Listening on ${WS_URL}.`;
+  if (state.source === 'replay') return 'Replay starting.';
+  return 'Mock generator starting.';
+}
+function ago(ms) { const s = ms / 1000; return s < 10 ? s.toFixed(1) + ' s' : Math.round(s) + ' s'; }
+function fmtClock(sec) { sec = Math.max(0, Math.floor(sec)); return String(Math.floor(sec / 60)).padStart(2, '0') + ':' + String(sec % 60).padStart(2, '0'); }
+function fmtT(t) { return Number.isFinite(t) ? new Date(t * 1000).toISOString().slice(11, 21) : '--:--:--.-'; }
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+function renderPanel(p, now) {
+  const d = p.dom, n = p.node, hz = n && n.hazard;
+  const hs = hz && hz.state ? String(hz.state) : null;
+  d.hazard.dataset.hz = hs || 'NONE';
+  d.word.textContent = hs ? hs.replace(/_/g, ' ') : 'AWAITING NODE';
+  d.why.textContent = hz && hz.why ? hz.why : `No frame from the node yet. ${sourceHint()}`;
+  d.hzLabel.textContent = `Hazard at ${(n && n.src) || 'node-01'}`;
+  const w = n && n.water;
+  d.wWet.textContent = w ? w.wet : '–';
+  d.wMm.textContent = w ? `${w.mm} mm` : '— mm';
+  d.tds.textContent = n && n.tds ? `TDS ${n.tds.ppm} ppm, ${n.tds.trend || ''}` : 'TDS —';
+
+  p.plan = computePlan(p);
+  const rid = p.plan && p.plan.route ? p.plan.route.id : null;
+  if (rid !== p.routeId) { p.routeId = rid; p.routeDrawStart = now; }
+}
+
+function renderStepper() {
+  const pl = P.edge.plan, idx = pl && pl.stage ? STAGES.indexOf(pl.stage) : -1;
+  document.querySelectorAll('#steps li').forEach((li, i) => {
+    li.classList.toggle('done', idx >= 0 && i < idx);
+    li.classList.toggle('now', i === idx);
+  });
+  $('missionId').textContent = (pl && pl.mission) || (P.edge.unit && P.edge.unit.mission) || '—';
+}
+
+function isAlive(p, now) { return !p.frozen && p.lastDecision > 0 && now - p.lastDecision < STALE_MS; }
+
+function renderTimed(now) {
+  for (const p of [P.central, P.edge]) {
+    const d = p.dom, alive = isAlive(p, now);
+    let s, txt;
+    if (p.frozen) { s = 'frozen'; txt = 'Frozen · no uplink'; }
+    else if (!p.lastDecision) { s = 'none'; txt = 'Awaiting node'; }
+    else if (!alive) { s = 'stale'; txt = `Silent ${ago(now - p.lastDecision)}`; }
+    else if (p.key === 'edge' && state.cut) { s = 'live'; txt = `Deciding · ${p.sinceCut} since cut`; }
+    else { s = 'live'; txt = p.key === 'central' ? `Receiving · ${CLOUD_RTT_MS} ms RTT` : 'Deciding on device'; }
+    if (d.pstate.textContent !== txt) d.pstate.textContent = txt;
+    d.pstate.dataset.s = s;
+    const n = p.node;
+    d.meta.textContent = n && n.hazard
+      ? `conf ${(+n.hazard.conf || 0).toFixed(2)} · decided on ${n.decided_on || '—'} · ${ago(now - p.nodeAt)} ago` : '';
+    if (p.key === 'central' && state.cut) {
+      d.boSub.textContent = `cut ${fmtClock((now - state.cutAt) / 1000)} ago · last decision ${p.lastDecision ? ago(now - p.lastDecision) + ' ago' : 'never'}`;
+    }
+  }
+  renderHeader(now);
+}
+
+function renderHeader(now) {
+  const e = P.edge, n = e.node, alive = isAlive(e, now);
+  let mode = 'none', txt = 'AWAITING NODE';
+  if (n) { if (n.decided_on === 'cloud') { mode = 'cloud'; txt = 'RUNNING CLOUD'; } else { mode = 'local'; txt = 'RUNNING LOCAL · GX10'; } }
+  $('runBadge').dataset.mode = mode;
+  if ($('runText').textContent !== txt) $('runText').textContent = txt;
+  const link = n && n.link;
+  $('runSub').textContent = `decided_on ${n ? n.decided_on : '—'} · inference ${link ? link.inference : '—'} · uplink ${state.cut ? 'CUT' : link ? (link.uplink ? 'up' : 'down') : '—'}`;
+
+  const sl = $('sunLabel');
+  const sTxt = !e.lastDecision ? ['Awaiting node', 'no decision yet']
+    : alive ? ['Deciding', `last decision ${ago(now - e.lastDecision)} ago`]
+    : ['No decisions', `source silent ${ago(now - e.lastDecision)}`];
+  sl.firstChild.nodeValue = sTxt[0];
+  sl.querySelector('small').textContent = sTxt[1];
+
+  document.body.classList.toggle('crisis', !!(n && n.hazard && n.hazard.state === 'IMPASSABLE'));
+
+  let html;
+  if (state.source === 'replay') html = `<span class="badge replay" title="Recorded mission m-7, not live data">REPLAY ${fmtClock(replay.pos)} / ${fmtClock(replay.dur)}</span>`;
+  else if (state.source === 'mock') html = `<span class="badge src" title="In-page generator, no hardware attached">MOCK DATA</span>`;
+  else html = `<span class="badge src" title="${esc(WS_URL)}">LIVE · ${ws.status === 'connected' ? 'connected' : ws.status === 'connecting' ? 'connecting' : `retry ${Math.max(0, Math.ceil((ws.retryAt - now) / 1000))} s`}</span>`;
+  const sb = $('srcBadge');
+  if (sb.innerHTML !== html) sb.innerHTML = html;
+}
+
+function renderRoutes() {
+  const pl = P.edge.plan, body = $('routesBody');
+  $('routesSrc').textContent = pl ? pl.from : '';
+  if (!pl || !pl.route) {
+    body.innerHTML = `<div class="rt-empty">${P.edge.node || P.edge.disp ? esc(pl && pl.why ? pl.why : 'Triaging. No route yet.') : 'No route decided yet. Waiting for a node frame.'}</div>`;
+    return;
+  }
+  const r = pl.route, blocked = x => /exceeds|impassable/i.test(x.reason || '');
+  const len = Number.isFinite(r.len_m) ? `<small>${r.len_m} m</small>` : '';
+  body.innerHTML = `<ul class="rt">` +
+    `<li class="take"><span class="ic" aria-hidden="true">✓</span><span class="nm">Taking ${esc(r.name || r.id)}${len}</span><span class="rs">${esc(pl.why)}</span></li>` +
+    pl.rejected.map(x => `<li class="${blocked(x) ? 'blocked' : 'no'}"><span class="ic" aria-hidden="true">✕</span><span class="nm">${blocked(x) ? 'Impassable' : 'Not taken'}: ${esc(x.name || x.id)}</span><span class="rs">${esc(x.reason || '')}</span></li>`).join('') +
+    `</ul>`;
+}
+
+/* ---------------- canvas ---------------- */
+function prep(c) {
+  const r = c.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr));
+  if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+  const ctx = c.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, r.width, r.height);
+  return [ctx, r.width, r.height];
+}
+
+// Eight-ray sun. alive=false draws it still and ash-grey.
+function drawSun(canvas, rot, pulse, alive) {
+  const [ctx, w, h] = prep(canvas);
+  if (w < 4 || h < 4) return;
+  const R = Math.min(w, h) / 2 * 0.86, r = R * 0.38, s = 1 + 0.12 * pulse;
+  ctx.save();
+  ctx.translate(w / 2, h / 2); ctx.scale(s, s); ctx.rotate(rot);
+  if (alive) { ctx.shadowColor = 'rgba(252,209,22,.7)'; ctx.shadowBlur = 3 + 16 * pulse; }
+  ctx.fillStyle = alive ? C.gold : '#5E5A4E';
+  for (let i = 0; i < 8; i++) {
+    ctx.save(); ctx.rotate(i * Math.PI / 4);
+    ctx.beginPath(); ctx.moveTo(-r * 0.3, -r * 1.22); ctx.lineTo(0, -R); ctx.lineTo(r * 0.3, -r * 1.22); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+// Six discrete rungs. Never a smooth level: fill moves one whole cell at a time.
+function drawGauge(p, now) {
+  const [ctx, w, h] = prep(p.dom.gauge);
+  if (w < 20 || h < 40) return;
+  const n = (p.node && p.node.water && p.node.water.rungs) || 6;
+  const wet = curWet(p, now);
+  const tubeW = 46, x0 = 22, gap = 5, pad = 2;
+  const cellH = (h - pad * 2 - gap * (n - 1)) / n;
+  ctx.textBaseline = 'middle';
+  for (let i = 0; i < n; i++) {
+    const y = h - pad - (i + 1) * cellH - i * gap;
+    const f = Math.max(0, Math.min(1, wet - i));
+    ctx.fillStyle = pearl(.05); ctx.fillRect(x0, y, tubeW, cellH);
+    if (f > 0) {
+      const fh = cellH * f, top = y + cellH - fh;
+      ctx.fillStyle = C.teal;
+      if (i === Math.ceil(wet) - 1 && !reduced) {
+        const amp = Math.min(2, fh / 3), wy = x => top + 2 + Math.sin(x / 8 + p.phase) * amp;
+        ctx.beginPath(); ctx.moveTo(x0, y + cellH);
+        for (let x = 0; x <= tubeW; x += 2) ctx.lineTo(x0 + x, wy(x));
+        ctx.lineTo(x0 + tubeW, y + cellH); ctx.closePath(); ctx.fill();
+        ctx.strokeStyle = 'rgba(170,225,229,.6)'; ctx.lineWidth = 1.5; ctx.beginPath();
+        for (let x = 0; x <= tubeW; x += 2) x ? ctx.lineTo(x0 + x, wy(x)) : ctx.moveTo(x0, wy(0));
+        ctx.stroke();
+      } else ctx.fillRect(x0, top, tubeW, fh);
+    }
+    ctx.strokeStyle = f >= 1 ? 'rgba(134,203,208,.85)' : pearl(.3); ctx.lineWidth = 1.5;
+    ctx.strokeRect(x0 + .75, y + .75, tubeW - 1.5, cellH - 1.5);
+    ctx.font = `500 16px "IBM Plex Mono", monospace`; ctx.textAlign = 'right';
+    ctx.fillStyle = f >= 1 ? C.pearl : pearl(.45); ctx.fillText(String(i + 1), x0 - 7, y + cellH / 2);
+  }
+  // passable depth limit, between rung 4 and 5
+  const k = Math.round(SIM.PASSABLE_MM / 10);
+  const ly = h - pad - k * cellH - (k - 0.5) * gap;
+  ctx.setLineDash([4, 4]); ctx.strokeStyle = pearl(.75); ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(x0 - 2, ly); ctx.lineTo(x0 + tubeW + 6, ly); ctx.stroke(); ctx.setLineDash([]);
+  ctx.textAlign = 'left'; ctx.fillStyle = pearl(.75); ctx.font = `500 16px ${FONT}`;
+  ctx.fillText('limit', x0 + tubeW + 9, ly);
+}
+
+function drawMap(p, now) {
+  const [ctx, w, h] = prep(p.dom.map);
+  if (w < 60 || h < 40) return;
+  const B = SITE.bounds, padX = 20, padTop = 34, padBot = 16;
+  const sc = Math.min((w - 2 * padX) / (B.x1 - B.x0), (h - padTop - padBot) / (B.y1 - B.y0));
+  const ox = (w - sc * (B.x1 - B.x0)) / 2 - B.x0 * sc;
+  const oy = padTop + ((h - padTop - padBot) - sc * (B.y1 - B.y0)) / 2 + B.y1 * sc;
+  const X = x => ox + x * sc, Y = y => oy - y * sc;
+  const wet = p.node && p.node.water ? curWet(p, now) : 0, ph = p.phase;
+
+  // water: the channel widens with the rung count
+  const grow = wet * 1.5, ch = SITE.channel;
+  ctx.fillStyle = `rgba(28,121,130,${0.2 + wet * 0.055})`;
+  ctx.beginPath();
+  for (let y = B.y1 + 6; y >= B.y0 - 6; y -= 2) ctx.lineTo(X(ch.x0 - grow + Math.sin(y / 6 + ph) * 0.7), Y(y));
+  for (let y = B.y0 - 6; y <= B.y1 + 6; y += 2) ctx.lineTo(X(ch.x1 + grow + Math.sin(y / 7 - ph) * 0.7), Y(y));
+  ctx.closePath(); ctx.fill();
+  const lw = SITE.lowland;
+  ctx.fillStyle = `rgba(28,121,130,${0.12 + wet * 0.045})`;
+  ctx.beginPath(); ctx.ellipse(X(lw.cx), Y(lw.cy), (lw.rx + wet * 3) * sc, (lw.ry + wet * 0.7) * sc, 0, 0, Math.PI * 2); ctx.fill();
+  const br = SITE.bridge;
+  ctx.fillStyle = pearl(.22); ctx.fillRect(X(br.x0), Y(br.y + 3), (br.x1 - br.x0) * sc, 6 * sc);
+
+  const plan = p.plan, chosen = plan && plan.route ? plan.route.id : null;
+  const rejected = {}; if (plan) for (const r of plan.rejected) rejected[r.id] = r;
+  const path = pts => { ctx.beginPath(); pts.forEach((q, i) => i ? ctx.lineTo(X(q[0]), Y(q[1])) : ctx.moveTo(X(q[0]), Y(q[1]))); };
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+
+  for (const id in SITE.routes) {
+    if (id === chosen) continue;
+    ctx.setLineDash([2, 7]); ctx.strokeStyle = pearl(.35); ctx.lineWidth = 3; path(SITE.routes[id].pts); ctx.stroke(); ctx.setLineDash([]);
+  }
+  let chosenPts = null;
+  if (chosen) chosenPts = plan.route.path && plan.route.path.length > 1
+    ? plan.route.path.map(q => { const xy = SIM.toXY(q[0], q[1]); return [xy.x, xy.y]; })
+    : SITE.routes[chosen] && SITE.routes[chosen].pts;
+  if (chosenPts) {
+    let L = 0; for (let i = 1; i < chosenPts.length; i++) L += Math.hypot(chosenPts[i][0] - chosenPts[i-1][0], chosenPts[i][1] - chosenPts[i-1][1]) * sc;
+    const k = reduced ? 1 : Math.min(1, (now - p.routeDrawStart) / 1200), e = 1 - Math.pow(1 - k, 3);
+    ctx.setLineDash([L, L]); ctx.lineDashOffset = L * (1 - e);
+    ctx.strokeStyle = 'rgba(18,17,16,.9)'; ctx.lineWidth = 10; path(chosenPts); ctx.stroke();
+    ctx.strokeStyle = C.pearl; ctx.lineWidth = 5; path(chosenPts); ctx.stroke();
+    ctx.setLineDash([]); ctx.lineDashOffset = 0;
+  }
+  ctx.font = `500 16px ${FONT}`; ctx.textBaseline = 'middle'; ctx.textAlign = 'center';
+  for (const id in SITE.routes) {
+    const r = SITE.routes[id], isC = id === chosen, rej = rejected[id];
+    ctx.fillStyle = isC ? C.pearl : pearl(.5);
+    ctx.font = `${isC ? 600 : 400} 16px ${FONT}`;
+    ctx.fillText(r.name, X(r.label[0]), Y(r.label[1]));
+    if (rej && /exceeds|impassable/i.test(rej.reason || '')) {
+      const mx = X(r.mark[0]) - 24, my = Y(r.mark[1]), s = 7;
+      ctx.strokeStyle = C.crimson; ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.moveTo(mx - s, my - s); ctx.lineTo(mx + s, my + s); ctx.moveTo(mx + s, my - s); ctx.lineTo(mx - s, my + s); ctx.stroke();
+    }
+  }
+  ctx.font = `500 16px ${FONT}`;
+  ctx.fillStyle = pearl(.7); ctx.fillRect(X(0) - 6, Y(0) - 6, 12, 12);
+  ctx.textAlign = 'left'; ctx.fillText('depot', X(0) - 6, Y(0) + 20);
+  const tx = X(SITE.target[0]), ty = Y(SITE.target[1]);
+  ctx.save(); ctx.translate(tx, ty); ctx.rotate(Math.PI / 4); ctx.strokeStyle = C.pearl; ctx.lineWidth = 3; ctx.strokeRect(-7, -7, 14, 14); ctx.restore();
+  ctx.textAlign = 'right'; ctx.fillStyle = C.pearl; ctx.fillText('evac point', tx + 8, ty + 22);
+
+  if (p.trail.length > 1) {
+    ctx.setLineDash([1, 5]); ctx.strokeStyle = pearl(.45); ctx.lineWidth = 3;
+    ctx.beginPath(); p.trail.forEach((q, i) => i ? ctx.lineTo(X(q.x), Y(q.y)) : ctx.moveTo(X(q.x), Y(q.y))); ctx.stroke(); ctx.setLineDash([]);
+  }
+  const nx = X(SITE.node.xy[0]), ny = Y(SITE.node.xy[1]);
+  const hs = p.node && p.node.hazard ? p.node.hazard.state : null;
+  ctx.fillStyle = hs === 'IMPASSABLE' ? C.crimson : hs === 'CONTAMINATED' ? C.gold : hs ? C.teal : pearl(.3);
+  ctx.beginPath(); ctx.arc(nx, ny, 9, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = C.pearl; ctx.lineWidth = 2.5; ctx.stroke();
+  ctx.textAlign = 'left'; ctx.fillStyle = C.pearl; ctx.fillText((p.node && p.node.src) || 'node-01', nx + 16, ny + 12);
+
+  const pose = curPose(p, now);
+  if (pose) {
+    const rx = X(pose.x), ry = Y(pose.y);
+    ctx.save(); ctx.translate(rx, ry); ctx.rotate(pose.hdg * Math.PI / 180);
+    ctx.beginPath(); ctx.moveTo(0, -14); ctx.lineTo(10, 10); ctx.lineTo(0, 5); ctx.lineTo(-10, 10); ctx.closePath();
+    ctx.fillStyle = C.pearl; ctx.fill(); ctx.strokeStyle = C.ground; ctx.lineWidth = 2; ctx.stroke();
+    ctx.restore();
+  }
+  ctx.textAlign = 'right'; ctx.fillStyle = pearl(.55);
+  ctx.fillText(pose ? `${(p.unit && p.unit.src) || 'unit'} ▲` : 'no robot pose yet', w - 4, 12);
+}
+
+/* ---------------- telemetry tail ---------------- */
+const tailEl = $('tail');
+const tailQ = [], rate = {}, tailLastBySrc = {};
+function tailPush(f) {
+  const src = f.src || kind(f), now = performance.now();
+  (rate[src] = rate[src] || []).push(now);
+  // 20 Hz robot pose would scroll too fast to read; every node and brain
+  // frame is shown, unit frames thinned to ~2/s. The header shows true rates.
+  if (kind(f) === 'unit' && now - (tailLastBySrc[src] || 0) < 480) return;
+  tailLastBySrc[src] = now;
+  tailQ.push(f);
+}
+function tailNote(text) { tailQ.push({ __note: text }); }
+function flushTail() {
+  if (!tailQ.length) return;
+  const frag = document.createDocumentFragment();
+  for (const f of tailQ.splice(0)) {
+    const div = document.createElement('div');
+    if (f.__note) { div.className = 'tl note'; div.textContent = f.__note; }
+    else {
+      div.className = 'tl k-' + kind(f);
+      const ts = document.createElement('span'); ts.className = 'ts'; ts.textContent = fmtT(f.t) + '  ';
+      div.append(ts, JSON.stringify(f));
+      div.title = JSON.stringify(f, null, 1);
+    }
+    frag.append(div);
+  }
+  tailEl.append(frag);
+  while (tailEl.childElementCount > 40) tailEl.firstElementChild.remove();
+  tailEl.scrollTop = tailEl.scrollHeight;
+}
+function renderRate(now) {
+  const parts = [];
+  for (const src in rate) {
+    const arr = rate[src]; while (arr.length && now - arr[0] > 3000) arr.shift();
+    if (arr.length) parts.push(`${src} ${(arr.length / 3).toFixed(1)} Hz`);
+  }
+  $('teleRate').textContent = parts.length ? parts.join(' · ') : 'no frames';
+}
+
+/* ---------------- sources ---------------- */
+const ws = { sock: null, status: 'idle', backoff: 1000, timer: 0, retryAt: 0 };
+function handleRaw(text) {
+  let v;
+  try { v = JSON.parse(text); }
+  catch (_) {
+    const lines = String(text).split('\n').filter(l => l.trim());
+    if (lines.length > 1) { lines.forEach(handleRaw); return; }
+    tailNote('unparseable frame: ' + String(text).slice(0, 90)); return;
+  }
+  if (Array.isArray(v)) v.forEach(ingest); else ingest(v);
+}
+function wsConnect() {
+  if (state.source !== 'live') return;
+  ws.status = 'connecting';
+  let sock;
+  try { sock = new WebSocket(WS_URL); } catch (_) { wsRetry(); return; }
+  ws.sock = sock;
+  sock.onopen = () => { ws.status = 'connected'; ws.backoff = 1000; tailNote(`connected ${WS_URL}`); if (state.cut) wsSend({ cmd: 'cut_network', cut: true }); };
+  sock.onmessage = e => { if (typeof e.data === 'string') handleRaw(e.data); else if (e.data && e.data.text) e.data.text().then(handleRaw); };
+  sock.onclose = () => { if (ws.sock !== sock) return; if (ws.status === 'connected') tailNote('websocket dropped, reconnecting'); ws.sock = null; wsRetry(); };
+  sock.onerror = () => { try { sock.close(); } catch (_) {} };
+}
+function wsRetry() {
+  if (state.source !== 'live') return;
+  ws.status = 'waiting'; clearTimeout(ws.timer);
+  ws.retryAt = performance.now() + ws.backoff;
+  ws.timer = setTimeout(wsConnect, ws.backoff);
+  ws.backoff = Math.min(8000, ws.backoff * 1.6);
+}
+function wsStop() { clearTimeout(ws.timer); if (ws.sock) { const s = ws.sock; ws.sock = null; s.onclose = null; try { s.close(); } catch (_) {} } ws.status = 'idle'; ws.backoff = 1000; }
+function wsSend(o) { if (ws.sock && ws.sock.readyState === 1) ws.sock.send(JSON.stringify(o)); }
+
+const mock = { sim: null, timer: 0, last: 0 };
+function mockStart() {
+  mock.sim = SIM.createSim({ seed: 11, nodeHz: 2, unitHz: 4 });
+  mock.sim.setCut(state.cut);
+  mock.last = performance.now();
+  mock.timer = setInterval(() => {
+    const now = performance.now(), dt = Math.min(1, (now - mock.last) / 1000); mock.last = now;
+    mock.sim.step(dt).forEach(ingest);
+  }, 50);
+}
+function mockStop() { clearInterval(mock.timer); mock.sim = null; }
+
+const replay = { frames: [], i: 0, t0: 0, start: 0, pos: 0, dur: 0, timer: 0 };
+try { replay.frames = JSON.parse($('replay-data').textContent || '[]'); } catch (_) { replay.frames = []; }
+if (replay.frames.length) replay.dur = replay.frames[replay.frames.length - 1].t - replay.frames[0].t;
+function replayStart() {
+  if (!replay.frames.length) { tailNote('no recorded mission bundled'); return; }
+  replay.i = 0; replay.t0 = replay.frames[0].t; replay.start = performance.now();
+  tailNote('REPLAY · recorded mission m-7, not live data');
+  replay.timer = setInterval(() => {
+    const el = (performance.now() - replay.start) / 1000;
+    replay.pos = Math.min(el, replay.dur);
+    while (replay.i < replay.frames.length && replay.frames[replay.i].t - replay.t0 <= el) ingest(replay.frames[replay.i++]);
+    if (replay.i >= replay.frames.length && el > replay.dur + 2.5) {
+      resetPanel(P.edge); resetPanel(P.central);
+      replay.i = 0; replay.start = performance.now();
+      tailNote('REPLAY · looping recorded mission');
+    }
+  }, 50);
+}
+function replayStop() { clearInterval(replay.timer); }
+
+function setSource(name) {
+  if (!['live', 'mock', 'replay'].includes(name)) name = 'live';
+  if (state.source === name) return;
+  wsStop(); mockStop(); replayStop();
+  state.source = name;
+  resetPanel(P.edge); resetPanel(P.central);
+  document.querySelectorAll('.srcs button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.src === name)));
+  tailNote(`source: ${name.toUpperCase()}`);
+  if (name === 'live') wsConnect(); else if (name === 'mock') mockStart(); else replayStart();
+  try { localStorage.setItem('tikbalang.src', name); } catch (_) {}
+}
+
+/* ---------------- cut network ---------------- */
+const cutBtn = $('cutBtn');
+function setCut(v) {
+  state.cut = v; state.cutAt = performance.now();
+  P.central.frozen = v; P.edge.sinceCut = 0;
+  P.central.el.classList.toggle('dark', v);
+  document.body.classList.toggle('cut', v);
+  cutBtn.setAttribute('aria-pressed', String(v));
+  cutBtn.querySelector('.cb-main').textContent = v ? 'NETWORK CUT' : 'CUT NETWORK';
+  cutBtn.querySelector('.cb-sub').textContent = v ? 'Press again to restore' : 'Sever the uplink to the cloud';
+  if (mock.sim) mock.sim.setCut(v);
+  wsSend({ cmd: 'cut_network', cut: v });
+  tailNote(v ? 'uplink cut · central dispatch unreachable · edge keeps deciding' : 'uplink restored');
+  P.central.dirty = true;
+}
+cutBtn.addEventListener('click', () => setCut(!state.cut));
+document.querySelectorAll('.srcs button').forEach(b => b.addEventListener('click', () => setSource(b.dataset.src)));
+document.addEventListener('keydown', e => {
+  if (e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
+  const k = e.key.toLowerCase();
+  if (k === 'c') setCut(!state.cut);
+  else if (k === 'l') setSource('live');
+  else if (k === 'm') setSource('mock');
+  else if (k === 'r') setSource('replay');
+});
+
+/* ---------------- loop ---------------- */
+let lastTs = performance.now(), lastTimed = 0;
+function loop() {
+  const now = performance.now(), dt = Math.min(0.1, (now - lastTs) / 1000); lastTs = now;
+  let edgeDirty = false;
+  for (const p of [P.central, P.edge]) {
+    if (p.dirty) { renderPanel(p, now); p.dirty = false; if (p.key === 'edge') edgeDirty = true; }
+    const alive = isAlive(p, now);
+    if (alive && !reduced) p.rot += dt * Math.PI * 2 / 30;           // one turn per 30 s
+    if (!p.frozen && !reduced) p.phase += dt * 2.4;
+    const pulse = alive && !reduced ? Math.max(0, 1 - (now - p.pulseAt) / 650) : 0;
+    drawSun(p.dom.sun, p.rot, pulse * pulse, alive);
+    drawGauge(p, now);
+    drawMap(p, now);
+  }
+  if (edgeDirty) { renderRoutes(); renderStepper(); }
+  const e = P.edge, eAlive = isAlive(e, now);
+  drawSun($('sunMain'), e.rot, eAlive && !reduced ? Math.pow(Math.max(0, 1 - (now - e.pulseAt) / 650), 2) : 0, eAlive);
+  if (now - lastTimed > 200) { lastTimed = now; renderTimed(now); renderRate(now); }
+  flushTail();
+  requestAnimationFrame(loop);
+}
+
+let startSrc = qs.get('src');
+if (!startSrc) { try { startSrc = localStorage.getItem('tikbalang.src'); } catch (_) {} }
+setSource(startSrc || 'live');
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
