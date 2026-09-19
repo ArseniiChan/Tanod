@@ -33,20 +33,22 @@
   --crimson:#CE1126;       /* IMPASSABLE and crisis only */
   --gold:#FCD116;          /* the sun, and CAUTION */
   --pearl:#F2EADF;         /* capiz pane fill */
-  --narra:#3B2A1E;         /* the lattice */
+  --narra:#2A1D14;         /* the lattice, darker against cold ground */
   --teal:#1C7982;          /* water, telemetry, passable */
 
   /* desaturated working values */
   --ground-blue:#123C6B;
-  --ground:#121110;        /* page ground: neutral warm near-black */
-  --pane:#1C1A18;          /* capiz pane, lit from behind */
+  --ground:#080C11;        /* cold night outside the window */
+  --pane:#1A1713;          /* capiz pane, lit from behind */
   --band-blue:#2A4F8C;
   --pearl-rgb:242,234,223;
   --teal-ink:#86CBD0;      /* sea teal lifted for text on dark */
   --ink:#F2EADF;
   --ink-2:rgba(242,234,223,.78);
   --ink-3:rgba(242,234,223,.52);
-  --hair:rgba(242,234,223,.10);
+  --hair:rgba(242,234,223,.09);
+  --rail:#05080C;          /* system chrome */
+  --rail-ink:rgba(242,234,223,.55);
   --shut:#0E0A07;
 
   --serif:'Newsreader',Georgia,serif;
@@ -254,6 +256,64 @@ body.cut #p-edge .pane{--lift:.025}
 @media (prefers-reduced-motion: reduce){
   *,*::before,*::after{transition:none !important;animation:none !important}
 }
+
+/* ============================================================
+   Operations refinement pass.
+   Cold ground, lit panes, one primary side, system chrome.
+   ============================================================ */
+
+/* Numbers that change must not jitter. */
+.w-big,.w-mm,.mission b,.meta,.run-sub,.bo-sub,.rail{font-variant-numeric:tabular-nums}
+
+/* Hairlines read as instrument. 2px outlines read as a toy. */
+.badge{border-width:1px;padding:8px 13px 7px}
+.chip{border-width:1px}
+.blackout{border-width:1px}
+
+/* Hierarchy: the edge side is the subject. The central side is the control. */
+.split{grid-template-columns:minmax(0,1fr) minmax(0,1.06fr)}
+#sideCloud .capiz{border-color:#20160F;background:#20160F}
+#sideCloud .pane{--a:.075}
+#sideCloud .side-head h2,#sideCloud .side-head p{opacity:.72}
+
+/* Lit panes get a faint warm bleed past the lattice, like real shell at night. */
+.capiz{box-shadow:0 0 0 1px rgba(0,0,0,.6), 0 18px 60px -28px rgba(242,214,170,.22)}
+#sideCloud .capiz{box-shadow:0 0 0 1px rgba(0,0,0,.6)}
+.side.dark .capiz{box-shadow:0 0 0 1px rgba(0,0,0,.6)}
+
+/* The cut switch is an instrument, not a cream slab. */
+.cutbtn,button.cut,#cutBtn{font-variant-numeric:tabular-nums}
+
+/* System rail: the chrome that says this is a system, not a page. */
+.rail{flex:none;display:flex;align-items:center;gap:0;height:30px;padding:0 32px;
+  background:var(--rail);border-top:1px solid var(--hair);
+  font:400 13px/1 var(--mono);color:var(--rail-ink);letter-spacing:.02em;white-space:nowrap;overflow:hidden}
+.rail span{display:inline-flex;align-items:center;gap:7px;padding:0 16px;
+  border-right:1px solid rgba(242,234,223,.07)}
+.rail span:first-child{padding-left:0}
+.rail .k{color:rgba(242,234,223,.32)}
+.rail .grow{flex:1;border-right:none;justify-content:flex-end;padding-right:0}
+.rail .led{width:6px;height:6px;border-radius:50%;background:var(--teal-ink)}
+.rail.cut .led{background:var(--crimson)}
+.rail.cut .lnk{color:var(--crimson)}
+@media (max-width:1100px){ .rail .opt{display:none} }
+
+/* The cut control is an instrument on a console, not a cream slab.
+   It is the one thing a judge touches, so it must look touchable and
+   belong to the same machine as everything around it. */
+#cutBtn{background:#14100C;color:var(--ink);
+  border:1px solid rgba(242,234,223,.18) !important;
+  box-shadow:0 4px 0 #0A0704, inset 0 1px 0 rgba(242,234,223,.06) !important}
+#cutBtn:hover{background:#1B1611}
+#cutBtn svg{color:var(--crimson)}
+body.cut #cutBtn{background:#1C0A08;border-color:var(--crimson) !important;
+  box-shadow:0 4px 0 #0A0302, inset 0 0 40px -12px rgba(206,17,38,.55) !important}
+
+/* Meta lines are chrome. They were wrapping mid-phrase and pulling focus. */
+.hz-meta{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.w-sub,.w-tds{font-size:15px}
+
+
 </style>
 </head>
 <body>
@@ -1411,6 +1471,38 @@ let startSrc = qs.get('src');
 if (!startSrc) { try { startSrc = localStorage.getItem('tikbalang.src'); } catch (_) {} }
 setSource(startSrc || 'live');
 requestAnimationFrame(loop);
+})();
+</script>
+
+<div class="rail" id="rail">
+  <span><b class="k">SYS</b> tikbalang-ops</span>
+  <span><b class="k">BUILD</b> <i id="rBuild">—</i></span>
+  <span class="opt"><b class="k">NODE</b> node-01</span>
+  <span class="opt"><b class="k">UNIT</b> unit-01</span>
+  <span><b class="k">LINK</b> <i class="led"></i><i class="lnk" id="rLink">UPLINK OK</i></span>
+  <span class="opt"><b class="k">INFERENCE</b> <i id="rInf">LOCAL · GX10</i></span>
+  <span class="grow"><b class="k">UPTIME</b> <i id="rUp">00:00:00</i> &nbsp; <b class="k">UTC</b> <i id="rClk">—</i></span>
+</div>
+<script>
+(function(){
+  var t0=Date.now(), pad=function(n){return String(n).padStart(2,'0')};
+  document.getElementById('rBuild').textContent =
+    'tkb-' + (location.hash.slice(1) || '4547fbc');
+  function tick(){
+    var d=new Date(), u=Math.floor((Date.now()-t0)/1000);
+    document.getElementById('rClk').textContent =
+      pad(d.getUTCHours())+':'+pad(d.getUTCMinutes())+':'+pad(d.getUTCSeconds());
+    document.getElementById('rUp').textContent =
+      pad(Math.floor(u/3600))+':'+pad(Math.floor(u/60)%60)+':'+pad(u%60);
+    // Mirror the uplink state the app already owns, without touching its code.
+    var cut = document.body.classList.contains('cut') ||
+              /CUT|FROZEN/i.test(document.getElementById('runSub')?.textContent||'') ||
+              /NETWORK CUT/i.test(document.body.innerText.slice(0,4000));
+    var rail=document.getElementById('rail');
+    rail.classList.toggle('cut', !!cut);
+    document.getElementById('rLink').textContent = cut ? 'UPLINK SEVERED' : 'UPLINK OK';
+  }
+  tick(); setInterval(tick, 1000);
 })();
 </script>
 </body>
