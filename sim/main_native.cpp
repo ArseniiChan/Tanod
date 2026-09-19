@@ -41,9 +41,17 @@ int main() {
     rover.step(cmd, dt);
     dr.update(rover.ticks_l, rover.ticks_r, rover.last_gyro_dps, dt);
 
-    // NEO-6M fixes land at about 1 Hz. Without them dead reckoning drifts
-    // without bound; with them the estimate stays inside GPS noise.
-    // Comment this line out to see why the encoders matter.
+    // NEO-6M fixes land at about 1 Hz.
+    //
+    // Do not read the printed err_m as dead-reckoning drift. This correction
+    // snaps the estimate straight onto truth-plus-noise, and the ARRIVED event
+    // fires on the same tick, so err_m at ARRIVED is one GPS fix's noise.
+    // Measured: 1.22 m with this line in, 0.02 m with it commented out.
+    //
+    // The correction still earns its place, just not here. Line 19 copies the
+    // rover's own m_per_tick into the estimator, so calibration error is zero,
+    // which no real robot enjoys. At a 5% tick error the mission ends 3.83 m
+    // from the goal with this line and 5.01 m without it.
     if (i % 20 == 0) dr.correct_with_gps(rover.gps_fix());
 
     if (i % 20 == 0) {   // 1 Hz to stdout so it stays readable

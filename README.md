@@ -63,8 +63,27 @@ firmware emits, at the same rate.
 ```
 
 `err_m` is the live gap between the dead reckoned estimate and ground truth.
-Comment out the `correct_with_gps` call in `sim/main_native.cpp` to watch that
-number grow without bound, which is the argument for the encoders in one line.
+
+Read it carefully, because it is easy to misread. With the 1 Hz correction on,
+`err_m` is dominated by the noise of the last GPS fix, not by dead-reckoning
+drift. The simulator hands the estimator the rover's own `m_per_tick`, so
+calibration error is exactly zero and drift alone is 0.02 m across the whole
+290 s run. Commenting out `correct_with_gps` makes that number go **down**, not
+up.
+
+The correction earns its place the moment calibration is imperfect, which is the
+only case that exists on real hardware. Measured against the same mission, miss
+distance from the final waypoint:
+
+| `m_per_tick` error | 1 Hz GPS on | GPS off |
+|---|---|---|
+| 0% (the simulator's ideal) | 2.94 m | 1.99 m |
+| 2% | 3.53 m | 3.19 m |
+| 5% | 3.83 m | 5.01 m |
+| 10% | 3.37 m | 7.89 m |
+
+That is the real argument: the encoders carry the rover between fixes, and the
+fixes stop an uncalibrated tick constant from compounding without bound.
 
 ## Repository layout
 
