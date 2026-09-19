@@ -42,7 +42,7 @@ default, or ws://<host>:8765 via ?ws= in the URL.
 Frames FROM the dashboard (the cut_network command) are printed to stderr, so
 the cut button is visible even before the firmware handles it.
 """
-import base64, collections, hashlib, json, os, socket, struct, subprocess, sys, threading
+import base64, collections, hashlib, json, os, socket, struct, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote
@@ -78,6 +78,12 @@ uplink_blocked = False
 clients, lock = [], threading.Lock()          # of Client
 first_client = threading.Event()
 last_by_src, last_lock = {}, threading.Lock()
+last_seen_at = {}                 # src -> wall clock of the most recent frame
+
+# Past this, a source is reported stale. A sensor that stopped sending and a
+# sensor reading steady water look identical in a cached frame, and the whole
+# point of the node is that somebody trusts what it says.
+STALE_AFTER_S = 10.0
 
 
 # --------------------------------------------------------------------------
@@ -232,6 +238,7 @@ def broadcast(line: str):
         if isinstance(src, str) and src:
             with last_lock:
                 last_by_src[src] = line
+                last_seen_at[src] = time.time()
     except Exception:
         pass                              # malformed frames relay, but do not
                                           # become the replayed state
@@ -446,16 +453,26 @@ class Api(BaseHTTPRequestHandler):
             return self._json(200, {"status": "up", "dashboards": n,
                                     "sources": srcs})
         if path == "/state":
+            now = time.time()
             with last_lock:
-                items = {k: json.loads(v) for k, v in last_by_src.items()}
-            return self._json(200, {"sources": items})
+                items = {}
+                for k, v in last_by_src.items():
+                    age = now - last_seen_at.get(k, now)
+                    items[k] = {"age_s": round(age, 1),
+                                "stale": age > STALE_AFTER_S,
+                                "frame": json.loads(v)}
+            return self._json(200, {"stale_after_s": STALE_AFTER_S,
+                                    "sources": items})
         if path.startswith("/state/"):
             src = unquote(path[len("/state/"):])
             with last_lock:
                 raw = last_by_src.get(src)
             if raw is None:
                 return self._json(404, {"error": "unknown src", "src": src})
-            return self._json(200, json.loads(raw))
+            age = time.time() - last_seen_at.get(src, time.time())
+            return self._json(200, {"age_s": round(age, 1),
+                                    "stale": age > STALE_AFTER_S,
+                                    "frame": json.loads(raw)})
         if path in ("/", "/index.html", "/dashboard"):
             # Serve the console from the bridge so the page and the API share
             # an origin. Opened as file:// the page has an opaque origin, and

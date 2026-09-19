@@ -77,22 +77,30 @@ paths:
     get:
       summary: Most recent frame from every source
       description: |
-        The bridge keeps the newest frame per `src`. This is what a new
-        dashboard is replayed on connect, so the console is never blank.
+        The bridge keeps the newest frame per `src`, which is what a new console
+        is replayed on connect so the screen is never blank.
+
+        Every entry carries `age_s` and `stale`. **Check them.** A sensor that
+        stopped transmitting and a sensor reporting steady water produce an
+        identical cached frame, and a reading nobody can date is a reading
+        nobody should trust.
       operationId: getState
       responses:
         "200":
-          description: One entry per source
+          description: One entry per source, each with its age
           content:
             application/json:
               schema:
                 type: object
-                required: [sources]
+                required: [sources, stale_after_s]
                 properties:
+                  stale_after_s:
+                    type: number
+                    description: Age past which a source is reported stale.
                   sources:
                     type: object
                     additionalProperties:
-                      $ref: "#/components/schemas/Frame"
+                      $ref: "#/components/schemas/DatedFrame"
 
   /state/{src}:
     get:
@@ -106,10 +114,10 @@ paths:
           example: node-01
       responses:
         "200":
-          description: The newest frame from that source
+          description: The newest frame from that source, with its age
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Frame" }
+              schema: { $ref: "#/components/schemas/DatedFrame" }
         "404":
           description: No frame has ever arrived from that src
           content:
@@ -432,6 +440,22 @@ components:
           description: Range to the nearest obstacle ahead.
         mission: { type: string, example: m-7 }
         battery_pct: { type: integer, minimum: 0, maximum: 100 }
+
+    DatedFrame:
+      type: object
+      description: |
+        A cached frame plus how old it is. The age is the point: without it a
+        dead sensor is indistinguishable from a calm one.
+      required: [age_s, stale, frame]
+      properties:
+        age_s:
+          type: number
+          description: Seconds since the bridge last received a frame from this source.
+        stale:
+          type: boolean
+          description: True once age_s exceeds stale_after_s.
+        frame:
+          $ref: "#/components/schemas/Frame"
 
     Triage:
       type: object

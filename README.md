@@ -1,15 +1,45 @@
 # Tikbalang
 
-Autonomous ground rover that delivers power banks to people cut off by floodwater.
+Flood-response logistics that keeps deciding after the network dies.
 
-Dispatched by dropping a pin on a map. It navigates there on its own and releases
-its payload on arrival. **The entire autonomy stack runs onboard an Espressif
-ESP32-S3, offline.** Cut the network mid-run and it keeps going. That is the point:
-in a flood, the network is the first thing you lose.
+A sensor node sits in the water and classifies the hazard **on the chip**, with no
+cloud round trip. A dispatch layer turns that verdict into a route that avoids the
+crossings a ground unit cannot pass. The payload is a power bank, because power is
+what brings communication back, and a charged phone in a dead-tower zone is useless
+without a radio to talk to.
+
+In a flood the towers go down first. Every delivery system we could find phones home
+to decide what to do next. Ours does not, and the claim is checkable rather than
+asserted: every telemetry frame carries `decided_on`, which reads `device` or
+`cloud` and is never hardcoded. Cut the uplink and watch it stay on `device` while
+the central dispatch panel returns a real error from a real failed call.
+
+**1.81 billion people are directly exposed to flood depths over 0.15 m in a
+1-in-100-year event, and 89% of them live in low- and middle-income countries**
+(Rentschler, Salhab & Jafino, *Flood Exposure and Poverty in 188 Countries*, Nature
+Communications, 2022). Our classifier calls anything over 30 mm impassable for a
+ground unit. That is the same regime the exposure literature measures, and it is why
+the sensing has to be cheap enough to leave in the water.
 
 Built at HackMIT 2026.
 
 ---
+
+## What runs today
+
+Stated precisely, because a README that overclaims is worse than one that does not.
+
+| Layer | What exists | State |
+|---|---|---|
+| **Field node** | `node/classify.cpp` four-state hazard classifier, `node/frame.cpp` telemetry, `firmware/node_sketch/` Arduino sketch reading a six-rung water ladder | Classifier and frame builder run and are tested. The sketch compiles the same sources via symlink, so board and simulator cannot drift. |
+| **Transport** | `ops/ws_bridge.py`, zero dependencies: WebSocket for consoles, TCP line ingest for producers, REST + OpenAPI | Runs. Survives malformed input, wrong baud rates, dead clients and client churn. |
+| **Dispatch** | `dispatch/triage.py` calling a real cloud model, with the node's own verdict as the fallback | Runs. The failure path is a real network failure, not a simulated one. |
+| **Console** | `dashboard/index.html`, single file, no framework | Runs. Central panel is driven by the real triage result, not by a button. |
+| **Navigation** | `nav/` geo, dead reckoning, mission state machine, obstacle avoidance | Runs against a synthetic rover in `sim/`. No vehicle was built; see `docs/REFRAME.md` for why that was cut deliberately. |
+
+What is **not** done: `firmware/esp32/` has no build configuration, so the claim that
+`nav/` and `node/` cross-compile for the ESP32-S3 is untested rather than false.
+`planning/` is empty.
 
 ## Why offline matters
 
