@@ -5,7 +5,17 @@ size_t build_frame(char* out, size_t cap,
                    const char* src, long t,
                    bool uplink_up, bool inference_local,
                    const Reading& r, const Verdict& v) {
-  const char* trend = r.tds_ppm >= 600 ? "rising" : "steady";
+  // A trend needs memory of the last reading. The old version tested
+  // ppm >= 600, which reported "rising" while the water was receding: script
+  // step 8 drops 760 -> 700 and still printed "rising". The 20 ppm deadband
+  // keeps sensor noise from flapping the label every frame.
+  static int prev_ppm = -1;
+  const char* trend = "steady";
+  if (prev_ppm >= 0) {
+    if      (r.tds_ppm > prev_ppm + 20) trend = "rising";
+    else if (r.tds_ppm < prev_ppm - 20) trend = "falling";
+  }
+  prev_ppm = r.tds_ppm;
   int n = snprintf(out, cap,
     "{\"src\":\"%s\",\"t\":%ld,"
     "\"link\":{\"uplink\":%s,\"inference\":\"%s\"},"
