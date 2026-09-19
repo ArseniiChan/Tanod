@@ -30,6 +30,15 @@ import argparse, glob, json, socket, subprocess, sys, time
 
 
 def candidate_ports():
+    """Windows has no /dev, so COM ports can only be enumerated through
+    pyserial. On macOS and Linux a glob is enough and needs nothing installed."""
+    if sys.platform == "win32":
+        try:
+            from serial.tools import list_ports
+        except ImportError:
+            sys.exit("On Windows this needs pyserial:\n"
+                     "    py -m pip install pyserial")
+        return [p.device for p in sorted(list_ports.comports())]
     pats = ["/dev/cu.usbmodem*", "/dev/cu.usbserial*", "/dev/cu.wchusbserial*",
             "/dev/cu.SLAB_USBtoUART*", "/dev/ttyACM*", "/dev/ttyUSB*"]
     out = []
@@ -44,8 +53,10 @@ def pick_port(explicit):
     found = candidate_ports()
     if not found:
         sys.exit("no serial port found. Plug the board in, then run --list.\n"
-                 "If nothing appears, the cable may be charge-only or the\n"
-                 "CH340 driver never attached (Elegoo and other UNO clones).")
+                 "If nothing appears: the cable may be charge-only (a lot of\n"
+                 "phone cables carry power but no data), or the CH340 driver\n"
+                 "never attached, which is common with Elegoo and other UNO\n"
+                 "clones. Try a different cable first, it is usually that.")
     if len(found) > 1:
         print(f"[fwd] several ports, using {found[0]} of {found}", file=sys.stderr)
     return found[0]
@@ -59,6 +70,9 @@ def open_serial(dev, baud):
         return serial.Serial(dev, baud, timeout=1)
     except ImportError:
         pass
+    if sys.platform == "win32":
+        sys.exit("On Windows this needs pyserial:\n"
+                 "    py -m pip install pyserial")
     flag = "-f" if sys.platform == "darwin" else "-F"
     subprocess.run(["stty", flag, dev, str(baud), "cs8", "-cstopb", "-parenb",
                     "-echo", "raw"], check=True)
