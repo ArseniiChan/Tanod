@@ -1,5 +1,6 @@
 #include "frame.h"
 #include <cstdio>
+#include <cmath>
 
 size_t build_frame(char* out, size_t cap,
                    const char* src, long t,
@@ -16,6 +17,15 @@ size_t build_frame(char* out, size_t cap,
     else if (r.tds_ppm < prev_ppm - 20) trend = "falling";
   }
   prev_ppm = r.tds_ppm;
+  // snprintf writes a bare `nan` or `inf` token for a non-finite float, which
+  // is not valid JSON and takes out every consumer of the line. A disconnected
+  // DS18B20 is the classic source. Clamp here rather than trusting the sensor.
+  const float temp = std::isfinite(r.temp_c) ? r.temp_c : 0.0f;
+  float snd = std::isfinite(r.sound_conf) ? r.sound_conf : 0.0f;
+  if (snd < 0.0f) snd = 0.0f;
+  if (snd > 1.0f) snd = 1.0f;
+  const int wet = r.rungs_wet < 0 ? 0 : r.rungs_wet;
+
   int n = snprintf(out, cap,
     "{\"src\":\"%s\",\"t\":%ld,"
     "\"link\":{\"uplink\":%s,\"inference\":\"%s\"},"
@@ -28,11 +38,13 @@ size_t build_frame(char* out, size_t cap,
     src, t,
     uplink_up ? "true" : "false",
     inference_local ? "local" : "cloud",
-    r.rungs_total, r.rungs_wet, depth_mm(r),
+    r.rungs_total, wet, depth_mm(r),
     r.tds_ppm, trend,
-    r.temp_c,
-    r.sound_conf >= 0.70f ? "distress" : "none", r.sound_conf,
+    temp,
+    snd >= 0.70f ? "distress" : "none", snd,
     hazard_name(v.hazard), v.conf, v.why,
     t, inference_local ? "device" : "cloud");
-  return n < 0 ? 0 : (size_t)n;
+  // snprintf returns the length it WANTED. Returning that lets a caller do
+  // send(fd, buf, n) and read past the NUL. 0 now means "did not fit".
+  return (n < 0 || (size_t)n >= cap) ? 0 : (size_t)n;
 }

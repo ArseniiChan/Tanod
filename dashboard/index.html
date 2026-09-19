@@ -6,7 +6,7 @@
 <title>Tikbalang · Flood Dispatch</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,500;0,6..72,600;1,6..72,400&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link media="print" onload="this.media='all'" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,500;0,6..72,600;1,6..72,400&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <!--
   Tikbalang dashboard. One file, no build step.
 
@@ -147,6 +147,8 @@ body.crisis .crisis-note{display:inline-block}
 .hz-meta{margin-top:auto;padding-top:8px}
 .hazard[data-hz=SHALLOW_CROSSING] .hz-word{color:var(--teal-ink)}
 .hazard[data-hz=CONTAMINATED] .hz-word{color:var(--gold)}
+.hazard[data-hz=DRY] .hz-word{color:var(--teal-ink)}
+.hazard[data-hz=UNKNOWN] .hz-word{color:var(--gold)}
 .hazard[data-hz=IMPASSABLE] .hz-wash{opacity:.42}
 .hazard[data-hz=IMPASSABLE] .hz-word{color:var(--ink);text-shadow:0 2px 0 rgba(0,0,0,.25)}
 .crisis-note{white-space:nowrap}
@@ -430,7 +432,7 @@ body.cut #cutBtn{background:#1C0A08;border-color:var(--crimson) !important;
   'use strict';
   const LAT0 = 42.35983, LON0 = -71.09211;
   const M_LAT = 111320, M_LON = 111320 * Math.cos(LAT0 * Math.PI / 180);
-  const RUNGS = 6, MM_PER_RUNG = 10, PASSABLE_MM = 40;
+  const RUNGS = 6, MM_PER_RUNG = 10, PASSABLE_MM = 30;   // must match PASSABLE_MAX_MM in node/classify.cpp
 
   // Site in metres, x east, y north, depot at the origin.
   const SITE = {
@@ -461,6 +463,12 @@ body.cut #cutBtn{background:#1C0A08;border-color:var(--crimson) !important;
     const S = SITE.routes['south-crossing'], N = SITE.routes['north-bridge'], L = SITE.routes['lowland-loop'];
     const R = r => ({ id: r.id, name: r.name, len_m: Math.round(r.len) });
     const low = { id: L.id, name: L.name, reason: `lowland loop lies below the south crossing, so deeper than ${mm} mm, and no sensor covers it` };
+    // An unsurveyed crossing is not a safe crossing. Without this the planner
+    // printed "within passable depth" for a node reporting a sensor fault.
+    if (st === 'UNKNOWN') {
+      return { route: R(N), why: `south crossing unsurveyed at ${src}: ${(node.hazard && node.hazard.why) || 'sensor fault'}; taking the bridge`,
+        rejected: [{ id: S.id, name: S.name, reason: `south crossing depth unknown at ${src}, not sending a unit through unsurveyed water` }, low] };
+    }
     const southDeep = mm > PASSABLE_MM || st === 'IMPASSABLE';
     if (committed === 'south-crossing' && pastCrossing) {
       return { route: R(S), why: `unit is already across the channel; finishing on the south side`,
@@ -926,7 +934,7 @@ const WS_URL = qs.get('ws') || `ws://${location.hostname || 'localhost'}:8765`;
 const CLOUD_RTT_MS = 380;     // central panel sees frames one cloud round trip later
 const STALE_MS = 6000;        // no decision for this long = the sun stops
 const STAGES = ['REQUESTED', 'TRIAGED', 'DISPATCHED', 'EN_ROUTE', 'DELIVERED'];
-const MODE_STAGE = { IDLE: 'REQUESTED', TRIAGE: 'TRIAGED', PLANNING: 'DISPATCHED', DRIVING: 'EN_ROUTE', REROUTING: 'EN_ROUTE', DELIVERING: 'EN_ROUTE', ARRIVED: 'DELIVERED', DELIVERED: 'DELIVERED' };
+const MODE_STAGE = { IDLE: 'REQUESTED', TRIAGE: 'TRIAGED', PLANNING: 'DISPATCHED', DRIVING: 'EN_ROUTE', AVOIDING: 'EN_ROUTE', REROUTING: 'EN_ROUTE', DELIVERING: 'EN_ROUTE', ARRIVED: 'DELIVERED', DELIVERED: 'DELIVERED' };
 const C = { pearl: '#F2EADF', gold: '#FCD116', teal: '#1C7982', tealInk: '#86CBD0', crimson: '#CE1126', ground: '#121110' };
 const pearl = a => `rgba(242,234,223,${a})`;
 const FONT = '"IBM Plex Sans", system-ui, sans-serif';
@@ -1033,7 +1041,7 @@ function applyFrame(p, f) {
 function computePlan(p) {
   if (p.disp) {
     const d = p.disp;
-    return { stage: d.stage, route: d.route || null, rejected: Array.isArray(d.rejected) ? d.rejected : [], why: d.why || '',
+    return { stage: d.stage, route: d.route || null, rejected: (Array.isArray(d.rejected) ? d.rejected : []).filter(x => x && typeof x === 'object'), why: d.why || '',
       mission: d.mission, from: `from ${d.src || 'brain'} · on ${d.decided_on || 'device'}` };
   }
   if (!p.node && !p.unit) return null;
@@ -1053,7 +1061,15 @@ function sourceHint() {
 }
 function ago(ms) { const s = ms / 1000; return s < 10 ? s.toFixed(1) + ' s' : Math.round(s) + ' s'; }
 function fmtClock(sec) { sec = Math.max(0, Math.floor(sec)); return String(Math.floor(sec / 60)).padStart(2, '0') + ':' + String(sec % 60).padStart(2, '0'); }
-function fmtT(t) { return Number.isFinite(t) ? new Date(t * 1000).toISOString().slice(11, 21) : '--:--:--.-'; }
+function fmtT(t) {
+  // A producer clock in milliseconds, microseconds or nanoseconds instead of
+  // seconds used to throw RangeError here and take the whole render loop with
+  // it. Out-of-range clocks read as unreadable, never reinterpreted: a board
+  // sending the wrong unit is a firmware bug and should look like one.
+  if (!Number.isFinite(t) || t < 1e9 || t > 1e11) return '--:--:--.-';
+  try { return new Date(t * 1000).toISOString().slice(11, 21); }
+  catch (_) { return '--:--:--.-'; }
+}
 function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
 function renderPanel(p, now) {
@@ -1446,7 +1462,7 @@ document.addEventListener('keydown', e => {
 
 /* ---------------- loop ---------------- */
 let lastTs = performance.now(), lastTimed = 0;
-function loop() {
+function loopBody() {
   const now = performance.now(), dt = Math.min(0.1, (now - lastTs) / 1000); lastTs = now;
   let edgeDirty = false;
   for (const p of [P.central, P.edge]) {
@@ -1464,7 +1480,16 @@ function loop() {
   drawSun($('sunMain'), e.rot, eAlive && !reduced ? Math.pow(Math.max(0, 1 - (now - e.pulseAt) / 650), 2) : 0, eAlive);
   if (now - lastTimed > 200) { lastTimed = now; renderTimed(now); renderRate(now); }
   flushTail();
-  requestAnimationFrame(loop);
+}
+
+// The render loop must never be able to die. Before this, requestAnimationFrame
+// was the last statement in loop(), so a single throw anywhere above it left the
+// loop un-rearmed: every panel frozen forever while the rail clock kept ticking,
+// which looks like working software showing stale data. Only a reload recovered.
+function loop() {
+  try { loopBody(); }
+  catch (e) { console.error('[loop]', e); tailNote('render error: ' + (e && e.message)); }
+  finally { requestAnimationFrame(loop); }
 }
 
 let startSrc = qs.get('src');

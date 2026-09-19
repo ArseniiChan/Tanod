@@ -161,14 +161,41 @@ def main():
         print("\n".join(found) if found else "no serial ports found")
         return
 
-    source = fake_lines() if a.fake else read_lines(
-        open_serial(pick_port(a.port), a.baud))
     if a.fake:
         print("[fwd] --fake, no serial device opened", file=sys.stderr)
 
+    def source_lines():
+        """Serial reads, surviving the board being unplugged. The TCP side
+        already reconnected forever while this side died on the first USB
+        nudge, which made 'reconnect is handled' quietly false for the more
+        likely failure."""
+        if a.fake:
+            yield from fake_lines()
+            return
+        while True:
+            try:
+                port = open_serial(pick_port(a.port), a.baud)
+            except SystemExit:
+                raise
+            except OSError as e:
+                print(f"[fwd] cannot open port ({e}), retry in 2s", file=sys.stderr)
+                time.sleep(2)
+                continue
+            try:
+                yield from read_lines(port)
+            except Exception as e:
+                print(f"[fwd] serial dropped ({type(e).__name__}: {e}), "
+                      f"reopening in 2s", file=sys.stderr)
+            finally:
+                try:
+                    port.close()
+                except Exception:
+                    pass
+            time.sleep(2)
+
     sock = connect(a.host, a.tcp)
     sent = bad = 0
-    for line in source:
+    for line in source_lines():
         if not line:
             continue
         try:

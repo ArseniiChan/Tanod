@@ -251,10 +251,9 @@ components:
               type: string
               enum: [rising, steady, falling]
               description: |
-                KNOWN DEFECT as of commit 4204645: `frame.cpp` sets this from
-                the instantaneous test `ppm >= 600`, with no memory of the
-                previous reading, so it reports "rising" while the water
-                recedes. Do not build logic on this field until it is fixed.
+                Direction of change against the previous reading from this
+                source, with a 20 ppm deadband so sensor noise does not flap
+                the label. "steady" until a second reading exists.
         temp_c: { type: number }
         sound:
           type: object

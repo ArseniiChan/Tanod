@@ -45,6 +45,7 @@ the cut button is visible even before the firmware handles it.
 import base64, collections, hashlib, json, os, socket, struct, subprocess, sys, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import unquote
 
 HOST = "0.0.0.0"
 WS_PORT, INGEST_PORT, HTTP_PORT = 8765, 8766, 8767
@@ -216,7 +217,7 @@ def broadcast(line: str):
     try:
         obj = json.loads(line)
         src = obj.get("src")
-        if src:
+        if isinstance(src, str) and src:
             with last_lock:
                 last_by_src[src] = line
     except Exception:
@@ -359,8 +360,17 @@ class Api(BaseHTTPRequestHandler):
     def _json(self, code, obj):
         self._send(code, json.dumps(obj).encode() + b"\n")
 
+    def _drain(self, n, chunk=65536):
+        while n > 0:
+            got = self.rfile.read(min(n, chunk))
+            if not got:
+                return
+            n -= len(got)
+
     def do_OPTIONS(self):
         self._send(204)
+
+    do_HEAD = None          # replaced below, after do_GET exists
 
     def do_GET(self):
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
@@ -368,7 +378,10 @@ class Api(BaseHTTPRequestHandler):
             with lock:
                 n = len(clients)
             with last_lock:
-                srcs = sorted(last_by_src)
+                # str() because one frame with a non-string src used to make
+                # this sort raise TypeError forever, killing /health for the
+                # life of the process while /state kept working.
+                srcs = sorted(map(str, last_by_src))
             return self._json(200, {"status": "up", "dashboards": n,
                                     "sources": srcs})
         if path == "/state":
@@ -376,7 +389,7 @@ class Api(BaseHTTPRequestHandler):
                 items = {k: json.loads(v) for k, v in last_by_src.items()}
             return self._json(200, {"sources": items})
         if path.startswith("/state/"):
-            src = path[len("/state/"):]
+            src = unquote(path[len("/state/"):])
             with last_lock:
                 raw = last_by_src.get(src)
             if raw is None:
@@ -390,14 +403,28 @@ class Api(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path.split("?", 1)[0].rstrip("/") != "/ingest":
+            try:
+                self._drain(int(self.headers.get("Content-Length") or 0))
+            except ValueError:
+                pass
             return self._json(404, {"error": "no such endpoint"})
-        n = int(self.headers.get("Content-Length") or 0)
+        if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
+            return self._json(411, {"error": "chunked encoding not supported, "
+                                             "send Content-Length"})
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return self._json(400, {"error": "Content-Length is not a number"})
         if n > MAX_LINE:
+            # Drain first. With HTTP/1.1 keep-alive an unread body becomes the
+            # next request line, so the client's following request comes back
+            # as a nonsense 414 or 501.
+            self._drain(n)
             return self._json(413, {"error": "body too large", "max": MAX_LINE})
         raw = self.rfile.read(n).decode("utf-8", "replace")
         try:
             obj = json.loads(raw)
-        except ValueError as e:
+        except (ValueError, RecursionError) as e:
             return self._json(400, {"error": "body is not JSON", "detail": str(e)})
         frames = obj if isinstance(obj, list) else [obj]
         for f in frames:
@@ -406,6 +433,9 @@ class Api(BaseHTTPRequestHandler):
         for f in frames:
             broadcast(json.dumps(f, separators=(",", ":")))
         return self._json(202, {"accepted": len(frames)})
+
+
+Api.do_HEAD = Api.do_GET    # curl -I and most health checks use HEAD
 
 
 def http_loop():

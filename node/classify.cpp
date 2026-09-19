@@ -25,6 +25,21 @@ const char* hazard_name(Hazard h) {
 
 Verdict classify(const Reading& r) {
   Verdict v;
+
+  // A fault must never render as a confident normal state. Before this guard a
+  // broken bottom electrode reported DRY at 0.95 confidence while the road was
+  // under 60mm of water, because depth_mm folds every negative to 0. The node
+  // sets rungs_wet to -1 when it sees a dry rung below a wet one, which is
+  // physically impossible for standing water and so is always a wiring fault.
+  if (r.rungs_total <= 0 || r.rungs_wet < 0 || r.rungs_wet > r.rungs_total) {
+    v.hazard = Hazard::UNKNOWN;
+    v.conf = 0.0f;
+    snprintf(v.why, sizeof(v.why),
+             "sensor fault, %d of %d rungs reporting, treat as unsurveyed",
+             r.rungs_wet, r.rungs_total);
+    return v;
+  }
+
   const int mm = depth_mm(r);
 
   // Depth decides passability first. Contamination is a warning on top of it,

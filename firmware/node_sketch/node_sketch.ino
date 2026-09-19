@@ -79,15 +79,24 @@ void loop() {
   Reading r;
   r.rungs_total = N_RUNGS;
 
-  // Count from the bottom and stop at the first dry rung. Water is continuous:
-  // a wet rung above a dry one is a wiring fault or a splash, not a deeper
-  // flood, and counting it would report depth that is not there.
+  // Count every wet rung, then check the pattern is physically possible.
+  // Stopping at the first dry rung looks tidy but converts a single broken
+  // electrode into a confident DRY reading while the road is under water, and
+  // the bottom rung is the one that corrodes first. A dry rung below a wet one
+  // cannot happen with standing water, so it is a fault: report -1 and let the
+  // classifier say UNKNOWN rather than inventing a depth.
   int wet = 0;
+  bool seen_dry = false, fault = false;
   for (int i = 0; i < N_RUNGS; ++i) {
-    if (read_avg(RUNG_PIN[i]) < wet_threshold) break;
-    ++wet;
+    const bool is_wet = read_avg(RUNG_PIN[i]) >= wet_threshold;
+    if (is_wet) {
+      ++wet;
+      if (seen_dry) fault = true;      // wet rung above a dry one
+    } else {
+      seen_dry = true;
+    }
   }
-  r.rungs_wet = wet;
+  r.rungs_wet = fault ? -1 : wet;
 
   // Gravity analog TDS, roughly 0 to 1000 ppm across the ADC range. Replace
   // with the vendor curve once there is a reference solution to check against.
