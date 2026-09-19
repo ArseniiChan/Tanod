@@ -931,7 +931,11 @@ const SIM = window.TikbalangSim;
 const SITE = SIM.SITE;
 const qs = new URLSearchParams(location.search);
 const WS_URL = qs.get('ws') || `ws://${location.hostname || 'localhost'}:8765`;
-const CLOUD_RTT_MS = 380;     // central panel sees frames one cloud round trip later
+const CLOUD_RTT_MS = 380;     // MOCK/REPLAY only: a plausible number for canned data
+// In LIVE the central panel stops pretending. It calls the bridge, which really
+// calls a cloud model, and renders whatever actually came back including the
+// failure. state.triage holds the last real result.
+const API_URL = qs.get('api') || `http://${location.hostname || 'localhost'}:8767`;
 const STALE_MS = 6000;        // no decision for this long = the sun stops
 const STAGES = ['REQUESTED', 'TRIAGED', 'DISPATCHED', 'EN_ROUTE', 'DELIVERED'];
 const MODE_STAGE = { IDLE: 'REQUESTED', TRIAGE: 'TRIAGED', PLANNING: 'DISPATCHED', DRIVING: 'EN_ROUTE', AVOIDING: 'EN_ROUTE', REROUTING: 'EN_ROUTE', DELIVERING: 'EN_ROUTE', ARRIVED: 'DELIVERED', DELIVERED: 'DELIVERED' };
@@ -943,7 +947,7 @@ const mq = matchMedia('(prefers-reduced-motion: reduce)');
 let reduced = mq.matches;
 mq.addEventListener ? mq.addEventListener('change', e => { reduced = e.matches; }) : mq.addListener(e => { reduced = e.matches; });
 
-const state = { source: null, cut: false, cutAt: 0 };
+const state = { source: null, cut: false, cutAt: 0, triage: null };
 const $ = id => document.getElementById(id);
 
 /* ---------------- panels ---------------- */
@@ -1108,12 +1112,25 @@ function renderTimed(now) {
     else if (!p.lastDecision) { s = 'none'; txt = 'Awaiting node'; }
     else if (!alive) { s = 'stale'; txt = `Silent ${ago(now - p.lastDecision)}`; }
     else if (p.key === 'edge' && state.cut) { s = 'live'; txt = `Deciding · ${p.sinceCut} since cut`; }
+    else if (p.key === 'central' && state.source === 'live') {
+      const tg = state.triage;
+      if (!tg) { s = 'none'; txt = 'Calling cloud…'; }
+      else if (tg.decided_on === 'cloud') { s = 'live'; txt = `Cloud answered · ${tg.latency_ms} ms`; }
+      else { s = 'stale'; txt = tg.error || 'cloud did not answer'; }
+    }
     else { s = 'live'; txt = p.key === 'central' ? `Receiving · ${CLOUD_RTT_MS} ms RTT` : 'Deciding on device'; }
     if (d.pstate.textContent !== txt) d.pstate.textContent = txt;
     d.pstate.dataset.s = s;
     const n = p.node;
-    d.meta.textContent = n && n.hazard
-      ? `conf ${(+n.hazard.conf || 0).toFixed(2)} · decided on ${n.decided_on || '—'} · ${ago(now - p.nodeAt)} ago` : '';
+    if (p.key === 'central' && state.source === 'live') {
+      const tg = state.triage;
+      d.meta.textContent = tg
+        ? `${tg.text} · decided on ${tg.decided_on}${tg.blocked_at ? ' · uplink cut at the ' + tg.blocked_at : ''}`
+        : 'awaiting first cloud call';
+    } else {
+      d.meta.textContent = n && n.hazard
+        ? `conf ${(+n.hazard.conf || 0).toFixed(2)} · decided on ${n.decided_on || '—'} · ${ago(now - p.nodeAt)} ago` : '';
+    }
     if (p.key === 'central' && state.cut) {
       d.boSub.textContent = `cut ${fmtClock((now - state.cutAt) / 1000)} ago · last decision ${p.lastDecision ? ago(now - p.lastDecision) + ' ago' : 'never'}`;
     }
@@ -1422,15 +1439,49 @@ function replayStart() {
 }
 function replayStop() { clearInterval(replay.timer); }
 
+/* ---------------- real cloud triage ----------------
+   The central panel's whole job is to fail honestly when the uplink dies, so
+   it must make a call that can actually fail. This asks the bridge, the bridge
+   asks the cloud, and the answer carries decided_on plus the real error text.
+   Nothing here is driven by the CUT button's boolean. */
+const triagePoll = { timer: 0, inflight: false };
+async function triageOnce() {
+  if (triagePoll.inflight || state.source !== 'live') return;
+  triagePoll.inflight = true;
+  const t0 = performance.now();
+  try {
+    const r = await fetch(`${API_URL}/triage`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ src: (P.edge.node && P.edge.node.src) || 'node-01' })
+    });
+    const j = await r.json();
+    j.rtt_ms = Math.round(performance.now() - t0);
+    state.triage = j;
+  } catch (e) {
+    // The bridge itself is unreachable, which is a different failure from the
+    // cloud being unreachable. Say which one.
+    state.triage = { ok: false, decided_on: 'device', source: 'device',
+      text: 'no answer from the bridge', error: `bridge unreachable: ${e.message}`,
+      latency_ms: Math.round(performance.now() - t0) };
+  } finally {
+    triagePoll.inflight = false;
+    if (state.source === 'live' && state.triage)
+      P.central.frozen = state.triage.decided_on !== 'cloud';
+    P.central.dirty = true;
+  }
+}
+function triageStart() { clearInterval(triagePoll.timer); triageOnce(); triagePoll.timer = setInterval(triageOnce, 3000); }
+function triageStop() { clearInterval(triagePoll.timer); triagePoll.timer = 0; state.triage = null; }
+
 function setSource(name) {
   if (!['live', 'mock', 'replay'].includes(name)) name = 'live';
   if (state.source === name) return;
-  wsStop(); mockStop(); replayStop();
+  wsStop(); mockStop(); replayStop(); triageStop();
   state.source = name;
   resetPanel(P.edge); resetPanel(P.central);
   document.querySelectorAll('.srcs button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.src === name)));
   tailNote(`source: ${name.toUpperCase()}`);
-  if (name === 'live') wsConnect(); else if (name === 'mock') mockStart(); else replayStart();
+  if (name === 'live') { wsConnect(); triageStart(); } else if (name === 'mock') mockStart(); else replayStart();
   try { localStorage.setItem('tikbalang.src', name); } catch (_) {}
 }
 
@@ -1438,7 +1489,11 @@ function setSource(name) {
 const cutBtn = $('cutBtn');
 function setCut(v) {
   state.cut = v; state.cutAt = performance.now();
-  P.central.frozen = v; P.edge.sinceCut = 0;
+  // In MOCK and REPLAY the data is canned, so the button drives the panel and
+  // that is honest. In LIVE the panel freezes only when a real call really
+  // failed, which the poller decides.
+  if (state.source !== 'live') P.central.frozen = v;
+  P.edge.sinceCut = 0;
   P.central.el.classList.toggle('dark', v);
   document.body.classList.toggle('cut', v);
   cutBtn.setAttribute('aria-pressed', String(v));

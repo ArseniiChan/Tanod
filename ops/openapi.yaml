@@ -179,6 +179,115 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+  /triage:
+    post:
+      summary: Ask the cloud, fall back to the device
+      description: |
+        Makes a **real** HTTPS call to a real model. It can really fail, and
+        when it does the failure is reported verbatim: the status code, the DNS
+        error, the timeout. Nothing here simulates an outage.
+
+        When the cloud does not answer, the response carries the verdict the
+        node already reached on its own, with `decided_on: device`. That is the
+        project's entire claim, observable in one field from outside the
+        process.
+
+        The timeout is 4 s by default (`TRIAGE_TIMEOUT`). A dispatcher that
+        hangs for thirty seconds on a dead tower has already failed.
+
+        Requires `OPENAI_API_KEY` in the bridge's environment. Without it the
+        endpoint still makes a real network call, reports reachability, and
+        says plainly that no triage was requested.
+      operationId: postTriage
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                src:
+                  type: string
+                  default: node-01
+                  description: Use the bridge's most recent frame from this source.
+                frame:
+                  $ref: "#/components/schemas/NodeFrame"
+                  description: Or supply a frame directly, overriding src.
+      responses:
+        "200":
+          description: |
+            A decision always exists, so this is 200 whether or not the cloud
+            answered. The interesting field is `decided_on`, not the status code.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Triage" }
+              examples:
+                cloud:
+                  summary: the cloud answered
+                  value:
+                    ok: true
+                    decided_on: cloud
+                    source: gpt-4o-mini
+                    text: Do not send a ground unit, 50 mm exceeds the 30 mm limit.
+                    error: null
+                    latency_ms: 812
+                deviceFallback:
+                  summary: the cloud did not, so the chip's verdict stands
+                  value:
+                    ok: true
+                    decided_on: device
+                    source: device
+                    text: "IMPASSABLE: 5 of 6 rungs wet, 50mm exceeds 30mm passable depth"
+                    error: cloud timed out after 4.0s
+                    latency_ms: 4009
+        "404":
+          description: No frame has ever arrived from that src
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "503":
+          description: dispatch/triage.py could not be imported
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /uplink:
+    get:
+      summary: Is the operator holding the uplink down
+      operationId: getUplink
+      responses:
+        "200":
+          description: Current uplink state at the bridge
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  blocked_at_bridge:
+                    type: boolean
+                    description: |
+                      Set by the dashboard's CUT NETWORK control. Reported
+                      rather than hidden, so the console can say where the
+                      break is instead of implying a failure that did not
+                      happen.
+                  triage_available: { type: boolean }
+
+  /:
+    get:
+      summary: The operations console
+      description: |
+        Serves `dashboard/index.html` so the page and this API share an origin.
+        Opened as `file://` the page has an opaque origin and Chrome blocks its
+        fetches to localhost regardless of CORS headers, which silently kills
+        the triage panel.
+      operationId: getConsole
+      responses:
+        "200":
+          description: The console
+          content:
+            text/html:
+              schema: { type: string }
+
   /openapi.yaml:
     get:
       summary: This document
@@ -323,6 +432,40 @@ components:
           description: Range to the nearest obstacle ahead.
         mission: { type: string, example: m-7 }
         battery_pct: { type: integer, minimum: 0, maximum: 100 }
+
+    Triage:
+      type: object
+      description: |
+        A dispatch decision and, crucially, where it was made.
+      required: [ok, decided_on, source, text, latency_ms]
+      properties:
+        ok: { type: boolean }
+        decided_on:
+          type: string
+          enum: [cloud, device]
+          description: |
+            `cloud` means a real remote call returned. `device` means it did not,
+            and the verdict the ESP32 reached on its own is standing in. This is
+            the field the whole project exists to demonstrate.
+        source:
+          type: string
+          description: The model that answered, or `device`, or `probe`.
+        text:
+          type: string
+          description: The triage line, or the node's own `hazard.why`.
+        error:
+          type: [string, "null"]
+          description: |
+            Why the cloud did not answer, verbatim. Null when it did.
+        latency_ms:
+          type: integer
+          description: Real measured time, including a real timeout.
+        blocked_at:
+          type: string
+          enum: [bridge]
+          description: |
+            Present only when an operator cut the uplink at the bridge, so the
+            console can distinguish a deliberate cut from a genuine outage.
 
     Error:
       type: object

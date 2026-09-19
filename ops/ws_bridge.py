@@ -47,6 +47,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "dispatch"))
+try:
+    from triage import triage as run_triage
+except Exception as _e:          # dispatch/triage.py missing or broken
+    run_triage = None
+    _triage_import_error = str(_e)
+
 HOST = "0.0.0.0"
 WS_PORT, INGEST_PORT, HTTP_PORT = 8765, 8766, 8767
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -62,6 +69,11 @@ MAX_LINE = 64 * 1024
 # each gets its own queue and its own sender thread, and the oldest frames are
 # dropped rather than blocking anyone. For live telemetry the newest frame wins.
 QUEUE_DEPTH = 512
+
+# Set by the dashboard's CUT NETWORK command. /triage reports it rather than
+# hiding it, so the screen can say where the break is instead of implying a
+# failure that did not happen.
+uplink_blocked = False
 
 clients, lock = [], threading.Lock()          # of Client
 first_client = threading.Event()
@@ -244,6 +256,15 @@ def serve_client(conn, addr):
             if msg is None:
                 break
             print(f"[bridge] from dashboard: {msg}", file=sys.stderr)
+            try:
+                cmd = json.loads(msg)
+            except Exception:
+                continue
+            if isinstance(cmd, dict) and cmd.get("cmd") == "cut_network":
+                global uplink_blocked
+                uplink_blocked = bool(cmd.get("cut"))
+                print(f"[bridge] uplink {'CUT' if uplink_blocked else 'restored'}"
+                      f" by the dashboard", file=sys.stderr)
     except Exception:
         pass
     finally:
@@ -337,6 +358,7 @@ def relay(stream):
 # --------------------------------------------------------------------------
 
 SPEC = Path(__file__).with_name("openapi.yaml")
+DASH = Path(__file__).resolve().parent.parent / "dashboard" / "index.html"
 
 
 class Api(BaseHTTPRequestHandler):
@@ -359,6 +381,45 @@ class Api(BaseHTTPRequestHandler):
 
     def _json(self, code, obj):
         self._send(code, json.dumps(obj).encode() + b"\n")
+
+    def _triage(self):
+        """Really call the cloud. Really report it when that fails."""
+        if run_triage is None:
+            return self._json(503, {"error": "triage unavailable",
+                                    "detail": _triage_import_error})
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return self._json(400, {"error": "Content-Length is not a number"})
+        if n > MAX_LINE:
+            self._drain(n)
+            return self._json(413, {"error": "body too large", "max": MAX_LINE})
+        raw = self.rfile.read(n).decode("utf-8", "replace") if n else ""
+        try:
+            body = json.loads(raw) if raw else {}
+        except (ValueError, RecursionError) as e:
+            return self._json(400, {"error": "body is not JSON",
+                                    "detail": str(e)})
+        if not isinstance(body, dict):
+            return self._json(422, {"error": "body must be an object"})
+
+        # Either send a frame, or name a src and the bridge uses what it last saw.
+        frame = body.get("frame")
+        if frame is None:
+            src = body.get("src", "node-01")
+            with last_lock:
+                cached = last_by_src.get(src)
+            if cached is None:
+                return self._json(404, {"error": "no frame for that src",
+                                        "src": src})
+            frame = json.loads(cached)
+        if not isinstance(frame, dict):
+            return self._json(422, {"error": "frame must be an object"})
+
+        result = run_triage(frame, blocked=uplink_blocked)
+        # 200 when a decision exists, which is always. The interesting field is
+        # decided_on, not the status code.
+        return self._json(200, result)
 
     def _drain(self, n, chunk=65536):
         while n > 0:
@@ -395,6 +456,18 @@ class Api(BaseHTTPRequestHandler):
             if raw is None:
                 return self._json(404, {"error": "unknown src", "src": src})
             return self._json(200, json.loads(raw))
+        if path in ("/", "/index.html", "/dashboard"):
+            # Serve the console from the bridge so the page and the API share
+            # an origin. Opened as file:// the page has an opaque origin, and
+            # Chrome blocks its fetches to localhost regardless of CORS, which
+            # would silently kill the triage panel during the demo.
+            if not DASH.exists():
+                return self._json(404, {"error": "dashboard/index.html not found",
+                                        "looked_in": str(DASH)})
+            return self._send(200, DASH.read_bytes(), "text/html; charset=utf-8")
+        if path == "/uplink":
+            return self._json(200, {"blocked_at_bridge": uplink_blocked,
+                                    "triage_available": run_triage is not None})
         if path in ("/openapi.yaml", "/openapi"):
             if not SPEC.exists():
                 return self._json(404, {"error": "openapi.yaml not found"})
@@ -402,7 +475,10 @@ class Api(BaseHTTPRequestHandler):
         return self._json(404, {"error": "no such endpoint", "path": path})
 
     def do_POST(self):
-        if self.path.split("?", 1)[0].rstrip("/") != "/ingest":
+        path = self.path.split("?", 1)[0].rstrip("/")
+        if path == "/triage":
+            return self._triage()
+        if path != "/ingest":
             try:
                 self._drain(int(self.headers.get("Content-Length") or 0))
             except ValueError:
@@ -446,6 +522,7 @@ def http_loop():
               f"[bridge]   lsof -nP -iTCP:{HTTP_PORT} -sTCP:LISTEN", file=sys.stderr)
         os._exit(1)
     srv.daemon_threads = True
+    print(f"[bridge] console     http://localhost:{HTTP_PORT}/", file=sys.stderr)
     print(f"[bridge] rest        http://localhost:{HTTP_PORT}/openapi.yaml",
           file=sys.stderr)
     srv.serve_forever()
