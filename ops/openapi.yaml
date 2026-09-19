@@ -1,0 +1,333 @@
+openapi: 3.1.0
+info:
+  title: Tikbalang Telemetry Bridge
+  version: 1.0.0
+  description: |
+    The contract every layer of Tikbalang agrees on.
+
+    Three ports, and only one of them is REST:
+
+    | Port | Protocol | Who uses it |
+    |------|----------|-------------|
+    | 8765 | WebSocket | dashboards, subscribing to the live stream |
+    | 8766 | TCP, one JSON object per line | boards and forwarders pushing frames |
+    | 8767 | HTTP, this document | teammates, curl, anything that prefers REST |
+
+    ## The WebSocket stream is not described here, on purpose
+
+    OpenAPI describes request/response over HTTP. It has no way to express a
+    server-pushed stream, so the `:8765` feed is documented in prose here and
+    its payloads are the same `Frame` schemas below. Every frame a dashboard
+    receives validates against `Frame`. If you want a machine-readable spec for
+    the stream itself, that is AsyncAPI, not this.
+
+    Do not poll `GET /state` in place of the WebSocket. The node emits at 5 Hz
+    and a robot at 20 Hz; polling loses frames and costs more than subscribing.
+    `GET /state` answers "what is true right now", which is a different and
+    smaller question.
+
+    ## Frames
+
+    Two shapes share the stream, told apart by `src`:
+
+    - `node-*` emits `NodeFrame`, built by `node/frame.cpp`
+    - `unit-*` emits `UnitFrame`, the vehicle pose contract
+
+    `decided_on` carries the project's central claim: whether a decision was
+    made on the device or in the cloud. It is a field, never a constant.
+
+servers:
+  - url: http://localhost:8767
+    description: bridge on this machine
+  - url: http://{host}:8767
+    description: bridge on a teammate's machine
+    variables:
+      host:
+        default: 10.189.66.227
+        description: LAN address of whichever laptop runs the bridge
+
+paths:
+  /health:
+    get:
+      summary: Is the bridge up, and who is connected
+      operationId: getHealth
+      responses:
+        "200":
+          description: Bridge is running
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, dashboards, sources]
+                properties:
+                  status: { type: string, const: up }
+                  dashboards:
+                    type: integer
+                    description: WebSocket clients currently subscribed
+                  sources:
+                    type: array
+                    items: { type: string }
+                    description: every src seen since the bridge started
+              example:
+                status: up
+                dashboards: 1
+                sources: [node-01, unit-01]
+
+  /state:
+    get:
+      summary: Most recent frame from every source
+      description: |
+        The bridge keeps the newest frame per `src`. This is what a new
+        dashboard is replayed on connect, so the console is never blank.
+      operationId: getState
+      responses:
+        "200":
+          description: One entry per source
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sources]
+                properties:
+                  sources:
+                    type: object
+                    additionalProperties:
+                      $ref: "#/components/schemas/Frame"
+
+  /state/{src}:
+    get:
+      summary: Most recent frame from one source
+      operationId: getStateBySrc
+      parameters:
+        - name: src
+          in: path
+          required: true
+          schema: { type: string }
+          example: node-01
+      responses:
+        "200":
+          description: The newest frame from that source
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Frame" }
+        "404":
+          description: No frame has ever arrived from that src
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /ingest:
+    post:
+      summary: Push one frame, or a batch
+      description: |
+        For producers that would rather speak HTTP than open a TCP socket.
+        Accepted frames are relayed to every dashboard immediately and become
+        the source's current state.
+
+        This endpoint is for convenience and testing. A board streaming at 5 Hz
+        or better should use the TCP line protocol on `:8766`, which avoids a
+        request/response round trip per frame.
+      operationId: postIngest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: "#/components/schemas/Frame"
+                - type: array
+                  items: { $ref: "#/components/schemas/Frame" }
+            examples:
+              single:
+                summary: one node frame
+                value:
+                  src: node-01
+                  t: 1789840000
+                  link: { uplink: false, inference: local }
+                  water: { rungs: 6, wet: 3, mm: 30 }
+                  tds: { ppm: 412, trend: steady }
+                  temp_c: 18.4
+                  sound: { event: none, conf: 0.0 }
+                  hazard:
+                    state: SHALLOW_CROSSING
+                    conf: 0.88
+                    why: 3 of 6 rungs wet, 30mm, turbidity 412 ppm
+                  decided_at: 1789840000
+                  decided_on: device
+      responses:
+        "202":
+          description: Accepted and relayed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accepted: { type: integer }
+        "400":
+          description: Body is not JSON
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "413":
+          description: Body over 64 KB
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: A frame is missing src
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /openapi.yaml:
+    get:
+      summary: This document
+      operationId: getSpec
+      responses:
+        "200":
+          description: The spec
+          content:
+            application/yaml:
+              schema: { type: string }
+
+components:
+  schemas:
+    Frame:
+      description: Anything on the stream. Discriminated by the src prefix.
+      oneOf:
+        - $ref: "#/components/schemas/NodeFrame"
+        - $ref: "#/components/schemas/UnitFrame"
+
+    NodeFrame:
+      type: object
+      description: |
+        Field node telemetry, built by `node/frame.cpp`. The classifier that
+        fills `hazard` runs on the chip and never calls the network.
+      required: [src, t, link, water, tds, temp_c, sound, hazard, decided_at, decided_on]
+      properties:
+        src:
+          type: string
+          pattern: "^node-"
+          example: node-01
+        t:
+          type: integer
+          description: Producer clock. Not synchronised between machines, so do
+            not order frames from different sources by this field.
+        link:
+          type: object
+          required: [uplink, inference]
+          properties:
+            uplink:
+              type: boolean
+              description: Is the route to the internet alive. False is the
+                interesting case and the demo's whole point.
+            inference:
+              type: string
+              enum: [local, cloud]
+        water:
+          type: object
+          required: [rungs, wet, mm]
+          properties:
+            rungs:
+              type: integer
+              description: Electrodes on the ladder. Six in the current build.
+              example: 6
+            wet:
+              type: integer
+              minimum: 0
+              description: How many are submerged.
+            mm:
+              type: integer
+              description: Depth implied by wet count. Rungs sit every 10 mm, so
+                this is quantised to 10, not continuous.
+        tds:
+          type: object
+          required: [ppm, trend]
+          properties:
+            ppm:
+              type: integer
+              description: Dissolved solids. Sewage and runoff push this up.
+            trend:
+              type: string
+              enum: [rising, steady, falling]
+              description: |
+                KNOWN DEFECT as of commit 4204645: `frame.cpp` sets this from
+                the instantaneous test `ppm >= 600`, with no memory of the
+                previous reading, so it reports "rising" while the water
+                recedes. Do not build logic on this field until it is fixed.
+        temp_c: { type: number }
+        sound:
+          type: object
+          required: [event, conf]
+          properties:
+            event:
+              type: string
+              enum: [none, rain, distress]
+            conf:
+              type: number
+              minimum: 0
+              maximum: 1
+        hazard:
+          type: object
+          required: [state, conf, why]
+          properties:
+            state:
+              type: string
+              enum: [UNKNOWN, DRY, SHALLOW_CROSSING, CONTAMINATED, IMPASSABLE]
+              description: |
+                Depth decides passability first. Contamination is a warning on
+                top, never a reason to call something passable. Above 30 mm is
+                IMPASSABLE for a ground unit.
+            conf: { type: number, minimum: 0, maximum: 1 }
+            why:
+              type: string
+              maxLength: 120
+              description: A plain sentence the node writes itself, for a human
+                reading the screen. Never a code.
+        decided_at: { type: integer }
+        decided_on:
+          type: string
+          enum: [device, cloud]
+          description: |
+            Where this verdict was reached. The claim the whole project rests
+            on. Never hardcode it.
+
+    UnitFrame:
+      type: object
+      description: Vehicle pose and mission state.
+      required: [src, t, pose, mode, wp, obstacle_mm, mission, battery_pct]
+      properties:
+        src:
+          type: string
+          pattern: "^unit-"
+          example: unit-01
+        t: { type: number }
+        pose:
+          type: object
+          required: [lat, lon, hdg]
+          properties:
+            lat: { type: number }
+            lon: { type: number }
+            hdg:
+              type: number
+              minimum: 0
+              exclusiveMaximum: 360
+              description: Compass convention. Increases clockwise from north.
+        mode:
+          type: string
+          enum: [IDLE, PLANNING, DRIVING, AVOIDING, ARRIVED, DELIVERED]
+        wp:
+          type: integer
+          description: Index of the waypoint being driven to.
+        obstacle_mm:
+          type: integer
+          description: Range to the nearest obstacle ahead.
+        mission: { type: string, example: m-7 }
+        battery_pct: { type: integer, minimum: 0, maximum: 100 }
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        detail: { type: string }
