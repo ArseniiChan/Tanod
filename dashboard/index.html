@@ -947,12 +947,25 @@ button{font-family:inherit;color:inherit}
 const SIM = window.TanodSim;
 const SITE = SIM.SITE;
 const qs = new URLSearchParams(location.search);
-const WS_URL = qs.get('ws') || `ws://${location.hostname || 'localhost'}:8765`;
+// Default to the origin this page was served from. The bridge upgrades
+// websockets on its HTTP port as well as on 8765, so same-origin works
+// locally and through a single tunnel alike, with no ?ws= override.
+// file:// has no usable host, so fall back to the historical default.
+const WS_URL = qs.get('ws') || (location.host
+  ? `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`
+  : 'ws://localhost:8765');
 const CLOUD_RTT_MS = 380;     // MOCK/REPLAY only: a plausible number for canned data
 // In LIVE the cloud pane stops pretending. It calls the bridge, which really
 // calls a cloud model, and renders whatever actually came back including the
 // failure. state.triage holds the last real result.
-const API_URL = qs.get('api') || `http://${location.hostname || 'localhost'}:8767`;
+// Same origin for the same reason, and for one more: hardcoding http:
+// here makes every fetch mixed content when the console is served over
+// https through a tunnel, so the browser blocks it and the cloud panel
+// dies silently. The bridge already serves this page, so its own origin
+// is always the right answer.
+const API_URL = qs.get('api') || (location.origin && location.origin !== 'null'
+  ? location.origin
+  : 'http://localhost:8767');
 const STALE_MS = 6000;        // no decision for this long = the unit reads stale
 const STAGES = ['REQUESTED', 'TRIAGED', 'DISPATCHED', 'EN_ROUTE', 'DELIVERED'];
 const MODE_STAGE = { IDLE: 'REQUESTED', TRIAGE: 'TRIAGED', PLANNING: 'DISPATCHED', DRIVING: 'EN_ROUTE', AVOIDING: 'EN_ROUTE', REROUTING: 'EN_ROUTE', DELIVERING: 'EN_ROUTE', ARRIVED: 'DELIVERED', DELIVERED: 'DELIVERED' };
