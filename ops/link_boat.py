@@ -40,6 +40,12 @@ GO_STATES = ("DRY", "PASSABLE")
 # Older than this and the node is not talking, which is also a reason to stop.
 STALE_AFTER_S = 10.0
 
+# Re-send the current decision at least this often, even when unchanged. The
+# boat stops if it hears nothing for CMD_TIMEOUT_MS (2000 ms in
+# firmware/boat/boat.ino), so this has to stay well under that. Raise one and
+# you must raise the other.
+HEARTBEAT_S = 1.0
+
 
 def list_ports():
     return sorted(glob.glob("/dev/cu.usbmodem*") + glob.glob("/dev/cu.usbserial*")
@@ -105,18 +111,33 @@ def main():
 
     print(f"[link] following {args.src} on {args.api}", file=sys.stderr)
 
-    # Start from neither, so the first decision is always transmitted. Sending
-    # the command again on every poll would be cheap, but it would also make
-    # the boat's serial log unreadable during a demo.
+    # Start from neither, so the first decision is always transmitted.
+    #
+    # The decision is also re-sent every HEARTBEAT_S even when it has not
+    # changed, because the boat runs a deadman: silence for longer than its
+    # CMD_TIMEOUT_MS is read as a dead link and stops the motors. Edge-triggered
+    # writes alone would trip that within seconds of a steady "go".
+    #
+    # Logging stays edge-triggered, so the serial log is still readable during
+    # a demo. The wire is chatty; the console is not.
+    #
+    # These two numbers are a pair. HEARTBEAT_S must stay comfortably below the
+    # boat's CMD_TIMEOUT_MS, and neither should be changed without the other.
     last = None
+    last_tx = 0.0
     try:
         while True:
             state, stale, err = poll(args.api, args.src, timeout=max(1.0, args.interval * 2))
             want = "go" if (state in GO_STATES and not stale) else "hold"
 
-            if want != last:
-                why = err or (f"{args.src} stale" if stale else f"{args.src} is {state}")
-                print(f"[link] {want.upper():4s}  ({why})", file=sys.stderr)
+            now = time.monotonic()
+            changed = want != last
+            due = (now - last_tx) >= HEARTBEAT_S
+
+            if changed or due:
+                if changed:
+                    why = err or (f"{args.src} stale" if stale else f"{args.src} is {state}")
+                    print(f"[link] {want.upper():4s}  ({why})", file=sys.stderr)
                 if fd is not None:
                     try:
                         os.write(fd, (want + "\n").encode("ascii"))
@@ -134,6 +155,7 @@ def main():
                         time.sleep(args.interval)
                         continue
                 last = want
+                last_tx = now
 
             time.sleep(args.interval)
     except KeyboardInterrupt:

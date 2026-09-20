@@ -19,6 +19,8 @@
 #include "gap.h"
 #include <Servo.h>
 #include <math.h>
+#include <stdlib.h>
+#include <string.h>
 
 // ===========================================================================
 // DRIVE CONFIGURATION
@@ -39,6 +41,35 @@
 // rewritten; it is not wired for that here.
 static const int M_L_IN1 = 4,  M_L_IN2 = 5,  M_L_PWM = 3;
 static const int M_R_IN1 = 6,  M_R_IN2 = 7,  M_R_PWM = 11;
+
+// A TB6612FNG holds both output bridges in standby until STBY is driven HIGH.
+// Without this the code is right, the wiring is right, and the motor is silent,
+// with nothing in telemetry to say why. Set to -1 for an L298N, which uses its
+// ENA/ENB jumpers instead and has no standby pin.
+static const int M_STBY = 8;
+
+// The I2C bus the SEN0628 is on. On an UNO Q the Qwiic connector is Wire1, and
+// a scan of Wire returns zero devices, so a sensor plugged into Qwiic with this
+// set to Wire reports "lidar not responding" forever. Four jumpers to the
+// header pins is Wire. Change this one line, do not rewire at the table.
+#define TOF_BUS Wire
+
+// Slew limit per 20 Hz tick, in units of full scale. A geared motor stepped
+// from 0 to cruise off a USB power bank pulls an inrush spike that browns the
+// board out and resets it mid-demo. 0.08 per tick is a 250 ms ramp to full.
+// Set to 1.0f to disable ramping entirely.
+static const float RAMP_PER_TICK = 0.08f;
+
+// "drive <l> <r> [ms]" is a bench-test command, not a teleop mode. It expires
+// on its own so a forgotten command cannot become a runaway.
+static const long MANUAL_MAX_MS = 5000;
+static const long MANUAL_DEFAULT_MS = 1500;
+
+// The boat stops if it has not heard from the link process in this long.
+// ops/link_boat.py re-sends its decision once a second for exactly this reason.
+// A yanked USB cable, a sleeping host or a hard-killed link process are all
+// failures the boat cannot see any other way.
+static const unsigned long CMD_TIMEOUT_MS = 2000;
 
 // Below this duty the geared motor buzzes and does not turn, which sounds like
 // a fault and wastes current. Anything nonzero is lifted to it.
@@ -72,7 +103,7 @@ static const int   TX_EVERY = 4;         // so telemetry goes out at 5Hz
 
 // ---------------------------------------------------------------------------
 
-DFRobot_MatrixLidar_I2C tof(0x33, &Wire);
+DFRobot_MatrixLidar_I2C tof(0x33, &TOF_BUS);
 Servo finL, finR;
 
 static uint16_t zones[64];
@@ -81,6 +112,20 @@ static bool  avoiding  = false;
 static bool  sensor_ok = false;
 static long  boot_epoch = 1789840000;
 static long  tick = 0;
+
+// Last time any recognised serial command arrived. Seeded in setup() so a board
+// powered up with no host attached does not trip the deadman before it is told
+// to do anything.
+static unsigned long last_cmd_ms = 0;
+
+// Bench-test override. manual_until is a millis() deadline; 0 means inactive.
+static unsigned long manual_until = 0;
+static MotorCommand  manual_cmd;
+
+// What was actually written to the bridges on the last tick, so telemetry can
+// report commanded thrust. A commanded stop and a dead driver look identical on
+// a dashboard otherwise.
+static float last_cmd_l = 0.0f, last_cmd_r = 0.0f;
 
 static float clamp1(float v) { return v < -1.0f ? -1.0f : (v > 1.0f ? 1.0f : v); }
 
@@ -102,36 +147,66 @@ static Gap look_ahead() {
   return choose_gap(zones, cfg);
 }
 
+// Applied duty per channel, carried between ticks so the ramp has somewhere to
+// live. Index 0 is left, 1 is right.
+static float applied[2] = {0.0f, 0.0f};
+
 // One H-bridge channel. Coast at zero rather than brake: a braked paddle wheel
 // in water is a rudder nobody asked for.
-static void motor_write(int in1, int in2, int pwm_pin, float cmd) {
-  if (fabsf(cmd) < 0.02f) {
+//
+// ch selects the ramp state. Stopping is immediate and never ramped: a slew
+// limit on the way down is a slew limit on the safety path, which is the one
+// place it must not exist.
+static void motor_write(int ch, int in1, int in2, int pwm_pin, float cmd) {
+  const float target = clamp1(cmd);
+
+  if (fabsf(target) < 0.02f) {
+    applied[ch] = 0.0f;
     digitalWrite(in1, LOW); digitalWrite(in2, LOW); analogWrite(pwm_pin, 0);
     return;
   }
-  int mag = (int)lroundf(fabsf(clamp1(cmd)) * PWM_MAX);
+
+  // Ramp toward the target. A sign change passes through zero on the way, so a
+  // reversal never slams the bridge from full forward to full reverse.
+  const float d = target - applied[ch];
+  if (d > RAMP_PER_TICK)       applied[ch] += RAMP_PER_TICK;
+  else if (d < -RAMP_PER_TICK) applied[ch] -= RAMP_PER_TICK;
+  else                         applied[ch]  = target;
+
+  const float out = applied[ch];
+  if (fabsf(out) < 0.02f) {
+    digitalWrite(in1, LOW); digitalWrite(in2, LOW); analogWrite(pwm_pin, 0);
+    return;
+  }
+
+  int mag = (int)lroundf(fabsf(out) * PWM_MAX);
   if (mag < PWM_MIN) mag = PWM_MIN;
   if (mag > PWM_MAX) mag = PWM_MAX;
-  digitalWrite(in1, cmd > 0 ? HIGH : LOW);
-  digitalWrite(in2, cmd > 0 ? LOW  : HIGH);
+  digitalWrite(in1, out > 0 ? HIGH : LOW);
+  digitalWrite(in2, out > 0 ? LOW  : HIGH);
   analogWrite(pwm_pin, mag);
 }
 
 static void stop_all() {
-  motor_write(M_L_IN1, M_L_IN2, M_L_PWM, 0.0f);
-  motor_write(M_R_IN1, M_R_IN2, M_R_PWM, 0.0f);
+  motor_write(0, M_L_IN1, M_L_IN2, M_L_PWM, 0.0f);
+  motor_write(1, M_R_IN1, M_R_IN2, M_R_PWM, 0.0f);
   finL.write(FIN_CENTER);
   finR.write(FIN_CENTER);
+  last_cmd_l = 0.0f;
+  last_cmd_r = 0.0f;
 }
 
 static void drive(const MotorCommand& c, float t_s) {
   const float left  = clamp1((float)c.left);
   const float right = clamp1((float)c.right);
 
+  last_cmd_l = left;
+  last_cmd_r = right;
+
 #if PADDLE_WHEELS == 2
   (void)t_s;
-  motor_write(M_L_IN1, M_L_IN2, M_L_PWM, left);
-  motor_write(M_R_IN1, M_R_IN2, M_R_PWM, right);
+  motor_write(0, M_L_IN1, M_L_IN2, M_L_PWM, left);
+  motor_write(1, M_R_IN1, M_R_IN2, M_R_PWM, right);
   finL.write(FIN_CENTER);
   finR.write(FIN_CENTER);
 
@@ -141,10 +216,18 @@ static void drive(const MotorCommand& c, float t_s) {
   // rudder only bites while water is moving past it, so a pivot in place is
   // not available with this drive. avoid_step() reverses first, which still
   // works: the hull backs out of the obstacle before it turns.
-  const float thrust = (left + right) * 0.5f;
-  const float turn   = clamp1((left - right) * 0.5f);
-  motor_write(M_L_IN1, M_L_IN2, M_L_PWM, thrust);
-  motor_write(M_R_IN1, M_R_IN2, M_R_PWM, 0.0f);
+  float thrust     = (left + right) * 0.5f;
+  const float turn = clamp1((left - right) * 0.5f);
+
+  // A pure pivot command averages to zero thrust, which on this drive means a
+  // rudder at full deflection with no flow past it: 1.25 s of avoid_step()'s
+  // pivot phase doing nothing at all. Give the helm some way on. This is the
+  // one place the hull cannot obey the command it was given, so it obeys the
+  // intent instead and keeps the sign of the turn.
+  if (fabsf(thrust) < 0.05f && fabsf(turn) > 0.05f) thrust = 0.35f;
+
+  motor_write(0, M_L_IN1, M_L_IN2, M_L_PWM, thrust);
+  motor_write(1, M_R_IN1, M_R_IN2, M_R_PWM, 0.0f);
   const int defl = (int)lroundf(turn * RUDDER_MAX);
   finL.write(FIN_CENTER + defl);
   finR.write(FIN_CENTER + FIN_R_SIGN * defl);
@@ -163,13 +246,44 @@ static void drive(const MotorCommand& c, float t_s) {
 #endif
 }
 
+// "drive <left> <right> [ms]", e.g. "drive 0.6 0 1000". Parsed with strtok and
+// atof rather than sscanf("%f"), because float conversion in scanf is not
+// guaranteed to be linked in on every core and a silently failing parse is the
+// worst possible bug in a motor test.
+static void parse_drive(const String& line) {
+  char buf[64];
+  line.toCharArray(buf, sizeof(buf));
+  strtok(buf, " \t");                          // "drive"
+  const char* a = strtok(NULL, " \t");
+  const char* b = strtok(NULL, " \t");
+  const char* c = strtok(NULL, " \t");
+  if (!a || !b) {
+    Serial.println("#drive usage: drive <left> <right> [ms]");
+    return;
+  }
+  manual_cmd.left  = clamp1((float)atof(a));
+  manual_cmd.right = clamp1((float)atof(b));
+  long ms = c ? atol(c) : MANUAL_DEFAULT_MS;
+  if (ms < 0)              ms = 0;
+  if (ms > MANUAL_MAX_MS)  ms = MANUAL_MAX_MS;
+  manual_until = millis() + (unsigned long)ms;
+  Serial.println("#drive ok");
+}
+
 static void handle_serial() {
   if (!Serial.available()) return;
   String cmd = Serial.readStringUntil('\n');
   cmd.trim();
-  if      (cmd == "go")   running = true;
-  else if (cmd == "hold") { running = false; avoiding = false; avoid_reset(); }
-  else if (cmd == "ping") Serial.println("#pong");
+  if      (cmd == "go")   { running = true;  last_cmd_ms = millis(); }
+  else if (cmd == "hold") { running = false; avoiding = false; avoid_reset();
+                            manual_until = 0; stop_all(); last_cmd_ms = millis(); }
+  else if (cmd == "ping") { Serial.println("#pong"); last_cmd_ms = millis(); }
+  else if (cmd.startsWith("drive")) { parse_drive(cmd); last_cmd_ms = millis(); }
+  else if (cmd == "stby") {
+    // Report the one pin most likely to be the reason nothing moves.
+    Serial.print("#stby pin ");
+    Serial.println(M_STBY);
+  }
 }
 
 void setup() {
@@ -178,8 +292,14 @@ void setup() {
 
   pinMode(M_L_IN1, OUTPUT); pinMode(M_L_IN2, OUTPUT); pinMode(M_L_PWM, OUTPUT);
   pinMode(M_R_IN1, OUTPUT); pinMode(M_R_IN2, OUTPUT); pinMode(M_R_PWM, OUTPUT);
+
+  // Take the TB6612FNG out of standby. Nothing turns until this is HIGH.
+  if (M_STBY >= 0) { pinMode(M_STBY, OUTPUT); digitalWrite(M_STBY, HIGH); }
+
   finL.attach(FIN_L_PIN);
   finR.attach(FIN_R_PIN);
+
+  last_cmd_ms = millis();
 
   // Stop first, then look for the sensor. Without this the wheel is free to
   // spin during the three seconds of lidar retry below.
@@ -197,13 +317,37 @@ void setup() {
 void loop() {
   handle_serial();
 
-  const Gap g   = sensor_ok ? look_ahead() : Gap();
+  // Deadman. ops/link_boat.py re-sends its decision once a second, so silence
+  // for longer than CMD_TIMEOUT_MS means the link is gone rather than that the
+  // verdict is unchanged. A boat holding its last command after the cable is
+  // pulled is the one failure the rest of this file's safety argument does not
+  // cover, because it is the one the boat cannot otherwise see.
+  if (running && (millis() - last_cmd_ms) > CMD_TIMEOUT_MS) {
+    running  = false;
+    avoiding = false;
+    avoid_reset();
+    Serial.println("#link timeout, holding");
+  }
+
+  // Bench override, and its expiry.
+  const bool manual = (manual_until != 0) && ((long)(millis() - manual_until) < 0);
+  if (manual_until != 0 && !manual) { manual_until = 0; stop_all(); }
+
+  const Gap g   = (sensor_ok && !manual) ? look_ahead() : Gap();
   const bool fault = !sensor_ok || (g.valid_bins == 0);
 
   MotorCommand cmd;
   const char* mode;
 
-  if (!running) {
+  if (manual) {
+    // Ahead of every other branch, including the fault path, so that a motor
+    // can be turned with no sensor attached. This is the only way to confirm
+    // wiring, direction and PWM_MIN before the lidar works, and it expires on
+    // its own so it cannot be left running by accident.
+    cmd  = manual_cmd;
+    mode = "MANUAL";
+    avoiding = false;
+  } else if (!running) {
     mode = "IDLE";
     avoiding = false;
   } else if (fault) {
@@ -231,14 +375,23 @@ void loop() {
   drive(cmd, (float)millis() / 1000.0f);
 
   if (tick % TX_EVERY == 0) {
-    char buf[352];
+    char buf[448];
     const long t = boot_epoch + (long)(millis() / 1000);
+
+    // Commanded thrust, so the console can tell a commanded stop from a dead
+    // driver. Without this the two are the same picture.
+    char cmd_s[40];
+    snprintf(cmd_s, sizeof(cmd_s), "{\"l\":%.2f,\"r\":%.2f}",
+             (double)last_cmd_l, (double)last_cmd_r);
+
     if (fault) {
+      const char* why = manual ? "manual drive override"
+                               : (sensor_ok ? g.why : "lidar not responding");
       snprintf(buf, sizeof(buf),
         "{\"src\":\"%s\",\"t\":%ld,\"pose\":null,\"mode\":\"%s\","
-        "\"obstacle_mm\":null,\"steer\":null,\"fault\":\"%s\",\"mission\":\"%s\","
+        "\"obstacle_mm\":null,\"steer\":null,\"fault\":\"%s\",\"cmd\":%s,\"mission\":\"%s\","
         "\"link\":{\"uplink\":true,\"inference\":\"local\"},\"decided_on\":\"device\"}",
-        SRC, t, mode, sensor_ok ? g.why : "lidar not responding", MISSION);
+        SRC, t, mode, why, cmd_s, MISSION);
     } else {
       // steer and gap are printed because a steering command nobody can read
       // is indistinguishable from a random one.
@@ -246,9 +399,9 @@ void loop() {
       snprintf(steer_s, sizeof(steer_s), "%.2f", (double)g.steer);
       snprintf(buf, sizeof(buf),
         "{\"src\":\"%s\",\"t\":%ld,\"pose\":null,\"mode\":\"%s\","
-        "\"obstacle_mm\":%d,\"steer\":%s,\"gap\":\"%s\",\"mission\":\"%s\","
+        "\"obstacle_mm\":%d,\"steer\":%s,\"gap\":\"%s\",\"cmd\":%s,\"mission\":\"%s\","
         "\"link\":{\"uplink\":true,\"inference\":\"local\"},\"decided_on\":\"device\"}",
-        SRC, t, mode, g.ahead_mm, g.ok ? steer_s : "0.00", g.why, MISSION);
+        SRC, t, mode, g.ahead_mm, g.ok ? steer_s : "0.00", g.why, cmd_s, MISSION);
     }
     Serial.println(buf);
   }
