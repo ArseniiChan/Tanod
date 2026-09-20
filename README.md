@@ -170,13 +170,19 @@ fins are still moving is a unit nobody is commanding.
 
 ## Sponsor challenges entered
 
-- **Arduino / Touch Grass** physical world sensing drives the hazard classifier, on an UNO Q
-- **Voloridge** flood risk route scoring over large public datasets
-- **Deepgram** speech to text for voice dispatch
-- **ElevenLabs** spoken status and confirmation
-- **Elastic** telemetry indexing and search
-- **OpenAI** dispatch triage
-- **Dropbox** mission log sync
+Two, because two have code. The earlier list named eight, five of which existed
+only as a line in a planning document. A repository that claims a track it did
+not build is a repository a judge can disprove in ten seconds, and every other
+claim on this page gets read differently afterwards.
+
+- **Arduino / Touch Grass** — `firmware/uno_q/`, flashed to an UNO Q and
+  streaming real depth and disturbance readings; `firmware/boat/`, compiled and
+  boot-tested on the same silicon.
+- **OpenAI** — `dispatch/triage.py`, a real HTTPS call whose failure is a real
+  network failure, with the node's own verdict as the fallback.
+
+Considered and not entered: Deepgram, ElevenLabs, Elastic, Dropbox, Voloridge.
+Each is one line in `docs/PLAN.md` and nothing more.
 
 ## Team
 
