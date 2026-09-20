@@ -39,14 +39,41 @@ sketchbook libraries folder:
 
 Measured on an UNO Q: 93784 bytes flash (11%), 38868 bytes globals (14%).
 
+## Drive
+
+`PADDLE_WHEELS` at the top of `boat.ino` selects the drive. All three compile.
+
+| Value | Drive | Steering |
+|---|---|---|
+| `0` | fins flap, no motor | flap amplitude differential |
+| `1` | **one paddle wheel (this build)** | fins held as rudders |
+| `2` | two paddle wheels | true differential, fins centred |
+
+The motor is an OSEPP 25 mm brushed gearmotor, 1:45, roughly 200 RPM at the
+output shaft. That is far too slow for a propeller and about right for a paddle
+wheel, so the hull is a riverboat. Print the wheel with a 50 to 70 mm paddle
+radius; bigger bites more water but loads the gearbox harder.
+
+One thing about `PADDLE_WHEELS 1` that matters in the water: **a rudder only
+bites while water is moving past it, so the hull cannot pivot in place.**
+`avoid_step()` reverses before it turns, which is what makes the behaviour still
+work: the hull backs out of the obstacle first, then steers.
+
 ## Wiring
 
 | Part | Where | Note |
 |---|---|---|
 | SEN0628 | I2C `0x33` | Gravity is JST-PH 2mm, UNO Q Qwiic is JST-SH 1mm. Adapter or four jumpers: VCC 3V3, GND, SDA, SCL. |
+| H-bridge L | `IN1 D4`, `IN2 D5`, `PWM D3` | TB6612FNG or L298N. A DRV8871 takes two PWM pins instead and needs `motor_write()` rewritten. |
+| H-bridge R | `IN1 D6`, `IN2 D7`, `PWM D11` | Only used when `PADDLE_WHEELS 2`. |
 | Fin servo L | `D9` signal | |
-| Fin servo R | `D10` signal | |
-| Servo power | battery, **not** the board | An MG996R stalls near 2.5A and will brown out the MCU. Tie battery ground to board ground. |
+| Fin servo R | `D10` signal | Set `FIN_R_SIGN` to `-1` if the horns are mirrored and the rudders fight each other. Check this dry. |
+| Motor and servo power | battery, **not** the board | An MG996R stalls near 2.5A and will brown out the MCU. Tie battery ground to board ground. |
+
+`PWM_MIN` is 60. Below roughly that duty a geared motor buzzes without turning,
+which sounds like a fault and wastes current, so any nonzero command is lifted
+to it. At zero the bridge coasts rather than brakes: a braked paddle wheel in
+water is a rudder nobody asked for.
 
 ## Running it
 
