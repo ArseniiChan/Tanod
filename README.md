@@ -2,8 +2,11 @@
 
 Flood-response logistics that keeps deciding after the network dies.
 
-A sensor node sits in the water and classifies the hazard **on the chip**, with no
-cloud round trip. A dispatch layer turns that verdict into a route that avoids the
+A sensor node sits on the bank and classifies the hazard **on the chip**, with no
+cloud round trip. It looks down at the water rather than reaching into it: a
+contact probe fails by corroding, and a corroded electrode reports DRY while the
+road is under water, which is the worst failure this system can have. A
+rangefinder can only fail by going silent, and silence is detectable. A dispatch layer turns that verdict into a route that avoids the
 crossings a ground unit cannot pass. The payload is a power bank, because power is
 what brings communication back, and a charged phone in a dead-tower zone is useless
 without a radio to talk to.
@@ -31,15 +34,22 @@ Stated precisely, because a README that overclaims is worse than one that does n
 
 | Layer | What exists | State |
 |---|---|---|
-| **Field node** | `node/classify.cpp` four-state hazard classifier, `node/frame.cpp` telemetry, `firmware/node_sketch/` Arduino sketch reading a six-rung water ladder | Classifier and frame builder run and are tested. The sketch compiles the same sources via symlink, so board and simulator cannot drift. |
+| **Field node** | `node/classify.cpp` four-state hazard classifier, `node/frame.cpp` telemetry, `firmware/uno_q/` running on an Arduino UNO Q | **Flashed and streaming real readings.** The STM32U585 runs `classify.cpp` unchanged, reading water depth from a downward-looking rangefinder and disturbance from an IMU. The sketch symlinks the same sources the simulator compiles, so board and simulator cannot drift. |
+| **Surface unit** | `firmware/boat/` reading an 8x8 matrix ToF, reusing `nav/avoid.cpp` unchanged; `ops/link_boat.py` carrying the node's verdict to it | Compiles and boot-tested on hardware, including the no-sensor fault path. Needs a second board to run with its sensor attached. |
 | **Transport** | `ops/ws_bridge.py`, zero dependencies: WebSocket for consoles, TCP line ingest for producers, REST + OpenAPI | Runs. Survives malformed input, wrong baud rates, dead clients and client churn. |
 | **Dispatch** | `dispatch/triage.py` calling a real cloud model, with the node's own verdict as the fallback | Runs. The failure path is a real network failure, not a simulated one. |
 | **Console** | `dashboard/index.html`, single file, no framework | Runs. Central panel is driven by the real triage result, not by a button. |
-| **Navigation** | `nav/` geo, dead reckoning, mission state machine, obstacle avoidance | Runs against a synthetic rover in `sim/`. No vehicle was built; see `docs/REFRAME.md` for why that was cut deliberately. |
+| **Navigation** | `nav/` geo, dead reckoning, mission state machine, obstacle avoidance | The reactive half (`avoid.cpp`) runs on the surface unit unchanged. The waypoint half runs only in `sim/`, because a hull indoors has no GNSS and no wheel odometry, so there is no position to follow waypoints with. |
 
-What is **not** done: `firmware/esp32/` has no build configuration, so the claim that
-`nav/` and `node/` cross-compile for the ESP32-S3 is untested rather than false.
-`planning/` is empty.
+What is **not** done: `MOUNT_HEIGHT_MM` in `firmware/uno_q/uno_q.ino` is still a
+placeholder, so reported depths carry a fixed offset until the sensor is measured
+in its final mount. The surface unit has never run with its lidar attached, for
+want of a second board. `firmware/esp32/` and `planning/` are empty.
+
+**The unit is not autonomous and the README will not say it is.** There is no
+position estimate on the water, so `pose` is `null` in every real unit frame and
+the console draws no marker. The unit reacts to obstacles and to the node's
+verdict. The decision is autonomous; the locomotion is commanded.
 
 ## Why offline matters
 
@@ -63,7 +73,8 @@ GPS + IMU + wheel encoders
    mission     waypoint state machine, arrival, sequencing
    avoid       reactive obstacle behaviour
         |
-        +---> firmware/esp32   real hardware, 20 Hz control loop
+        +---> firmware/boat    real hardware, 20 Hz control loop
+                               (avoid only: no GNSS on water, so no waypoints)
         +---> sim/             laptop build, fake sensors, same code
                                     |
                                     v
@@ -72,7 +83,7 @@ GPS + IMU + wheel encoders
 
 `nav/` compiles unchanged for both targets. That is deliberate. Every line of
 navigation logic is testable on a laptop with no hardware attached, which is why
-the dashboard and the nav loop were both working before the rover existed.
+the dashboard and the nav loop were both working before the hull existed.
 
 ## Build and run the simulator
 
@@ -119,9 +130,11 @@ fixes stop an uncalibrated tick constant from compounding without bound.
 
 | Path | What it is |
 |---|---|
-| `nav/` | Navigation core. Pure C++, no platform headers. Builds for laptop and ESP32. |
+| `nav/` | Navigation core. Pure C++, no platform headers. Builds for laptop and MCU. |
 | `sim/` | Synthetic rover and native entry point. Develop without hardware. |
-| `firmware/esp32/` | Sensor drivers, motor PWM, encoder ISR, WiFi, telemetry server. |
+| `firmware/uno_q/` | Field node. Flashed, streaming real readings. |
+| `firmware/boat/` | Surface unit. Matrix ToF, servo fins, reactive avoidance. |
+| `firmware/esp32/` | Empty. Kept as a marker, not a claim. |
 | `dashboard/` | Live telemetry view. |
 | `dispatch/` | Map to coordinates, voice dispatch. |
 | `planning/` | Flood risk route scoring over public datasets. |
@@ -130,23 +143,34 @@ fixes stop an uncalibrated tick constant from compounding without bound.
 
 ## Calibration
 
-Two numbers decide whether a waypoint run is clean or ends in a wall. Both take
-about fifteen minutes and both live in `docs/calibration.md` once measured.
+**`MOUNT_HEIGHT_MM`** is the one that decides whether the demo is telling the
+truth. It is the distance in mm from the node's sensor face to the dry bottom of
+the tray, and depth is `MOUNT_HEIGHT_MM - measured`. Get it wrong and every depth
+is wrong by the same offset, which is the easiest bug in the build to miss
+because the numbers still look plausible. Measure it once, with the sensor
+clamped in the position it will demo in, by sending `cal` on the node's serial
+port and reading back the raw range.
+
+Two more live in `docs/calibration.md` and matter only if the waypoint follower
+is ever used on a wheeled vehicle:
 
 - **`m_per_tick`** drive a measured 2 m in a straight line, count encoder ticks,
   divide.
-- **IMU heading offset** point the rover at a known bearing, record the delta.
+- **IMU heading offset** point the vehicle at a known bearing, record the delta.
 
 ## Safety
 
-The control loop carries a motor watchdog. If the nav loop misses its deadline,
-both motors stop. This is the difference between a software fault being a pause
-and a software fault being a rover off the edge of the judging table.
+Every failure resolves to stop. A sensor that returns no range sets
+`obstacle_mm` to `null`, which is read as a fault and never as open water, so
+`go` will not start the fins while the lidar is silent. `ops/link_boat.py`
+commands `hold` on anything that is not a confident PASSABLE: an IMPASSABLE
+verdict, an UNKNOWN one, a node that has gone stale, an unreachable bridge. It
+also writes `hold` on its own exit, because a link process that dies while the
+fins are still moving is a unit nobody is commanding.
 
 ## Sponsor challenges entered
 
-- **Espressif** full autonomy onboard an ESP32-S3, offline, no companion computer
-- **Arduino / Touch Grass** physical world sensing drives the hazard classifier
+- **Arduino / Touch Grass** physical world sensing drives the hazard classifier, on an UNO Q
 - **Voloridge** flood risk route scoring over large public datasets
 - **Deepgram** speech to text for voice dispatch
 - **ElevenLabs** spoken status and confirmation
