@@ -45,6 +45,48 @@ static const float DISTURB_FULL_G = 0.35f;   // deviation that reads as 1.0
 static const char* SRC = "node-01";
 static const int   HZ  = 5;
 
+// ---------------------------------------------------------------------------
+// LOCAL ALERT
+//
+// The obvious hole in "it decides without the network" is that a correct
+// decision stranded on a microcontroller helps nobody. During the storm that
+// took the towers down there is no link to send it over, and the decision is
+// worth something only at the crossing, at the moment somebody is deciding
+// whether to walk into the water.
+//
+// So the node signals where it stands. One 2 second cycle, ten 200 ms slots,
+// '#' lit and '.' dark. Blink codes rather than a screen because a code is
+// readable in rain, in the dark, from a distance, and costs no power budget.
+//
+// IMPASSABLE is deliberately the only fast pattern: the one state that must
+// not be mistaken for any other reads differently from across a road.
+// ---------------------------------------------------------------------------
+static const int SLOT_MS   = 200;                 // matches the 5 Hz loop
+static const int SLOTS     = 10;                  // so one cycle is 2 s
+
+static const char* PAT_DRY         = "..........";
+static const char* PAT_PASSABLE    = "#.........";   // one blink: go
+static const char* PAT_CONTAMINATED= "#.#.......";   // two: passable, foul water
+static const char* PAT_IMPASSABLE  = "#.#.#.#.#.";   // fast: do not enter
+static const char* PAT_UNKNOWN     = "###.#.###.";   // long-short-long: fault
+
+static const char* pattern_for(Hazard h) {
+  switch (h) {
+    case Hazard::DRY:              return PAT_DRY;
+    case Hazard::SHALLOW_CROSSING: return PAT_PASSABLE;
+    case Hazard::CONTAMINATED:     return PAT_CONTAMINATED;
+    case Hazard::IMPASSABLE:       return PAT_IMPASSABLE;
+    default:                       return PAT_UNKNOWN;
+  }
+}
+
+// Called once per loop. Non-blocking: the slot comes from the clock, not from
+// a delay, so the telemetry rate and the blink rate cannot drift apart.
+static void signal_locally(Hazard h) {
+  const int slot = (int)((millis() / SLOT_MS) % SLOTS);
+  digitalWrite(LED_BUILTIN, pattern_for(h)[slot] == '#' ? HIGH : LOW);
+}
+
 static bool uplink_up       = true;
 static bool inference_local = true;
 
@@ -53,6 +95,7 @@ static long boot_epoch = 1789840000;
 void setup() {
   Serial.begin(115200);
   while (!Serial && millis() < 3000) {}
+  pinMode(LED_BUILTIN, OUTPUT);
   Modulino.begin();
   surface.begin();
   imu.begin();
@@ -110,6 +153,11 @@ void loop() {
   r.sound_conf = disturb;                   // water movement, not audio
 
   Verdict v = classify(r);                  // the real classifier, on the MCU
+
+  // Show the verdict at the crossing before anything is transmitted anywhere.
+  // This line is the only part of the system that still works when both the
+  // uplink AND the laptop are gone.
+  signal_locally(v.hazard);
 
   char buf[512];
   long t = boot_epoch + (long)(millis() / 1000);

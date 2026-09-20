@@ -32,7 +32,7 @@ python3 ops/ws_bridge.py --serve-only
 python3 ops/serial_forward.py --port /dev/cu.usbmodemXXXX --host 127.0.0.1
 ```
 
-**3. Verify, do not assume.**
+**3. Verify, do not assume.** `sh ops/preflight.sh` does all of the checks below in one go and prints the fix for anything that fails. The manual versions:
 
 ```
 curl -s localhost:8767/health
@@ -45,9 +45,8 @@ curl -s localhost:8767/state/node-01
 **4. Confirm the cloud path answers.**
 
 ```
-curl -s localhost:8767/state/node-01 \
-  | python3 -c 'import json,sys;print(json.dumps(json.load(sys.stdin)["frame"]))' \
-  | curl -s -X POST -H "Content-Type: application/json" -d @- localhost:8767/triage
+curl -s -X POST -H "Content-Type: application/json" \
+  -d '{"src":"node-01"}' localhost:8767/triage
 ```
 
 You want `"decided_on": "cloud"` and a real sentence in `text`. If it says

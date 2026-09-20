@@ -79,13 +79,12 @@ esac
 # ---- cloud path answers -----------------------------------------------------
 # source:"probe" means the key is not in the BRIDGE's environment. Exporting it
 # in another shell does nothing; the bridge has to be started from that shell.
-TRI=$(curl -s --max-time 10 "$API/state/$SRC" 2>/dev/null \
-      | python3 -c 'import json,sys
-try:
-    print(json.dumps(json.load(sys.stdin)["frame"]))
-except Exception:
-    print("{}")' 2>/dev/null \
-      | curl -s --max-time 10 -X POST -H "Content-Type: application/json" -d @- "$API/triage" 2>/dev/null)
+# Exactly the body the dashboard sends: name the source and let the bridge use
+# the frame it last saw. Posting a bare frame also "works", but only because a
+# body with no "frame" key falls through to src="node-01", which is an accident
+# rather than the contract.
+TRI=$(curl -s --max-time 10 -X POST -H "Content-Type: application/json" \
+      -d "{\"src\":\"$SRC\"}" "$API/triage" 2>/dev/null)
 case "$TRI" in
   *'"source": "probe"'*) bad "cloud triage answers" "OPENAI_API_KEY is not in the bridge's environment; export it, then restart the bridge from that shell" ;;
   *'"decided_on": "cloud"'*) ok "cloud triage answers" ;;

@@ -49,10 +49,29 @@ Measured on an UNO Q: 93784 bytes flash (11%), 38868 bytes globals (14%).
 | `1` | **one paddle wheel (this build)** | fins held as rudders |
 | `2` | two paddle wheels | true differential, fins centred |
 
-The motor is an OSEPP 25 mm brushed gearmotor, 1:45, roughly 200 RPM at the
-output shaft. That is far too slow for a propeller and about right for a paddle
-wheel, so the hull is a riverboat. Print the wheel with a 50 to 70 mm paddle
-radius; bigger bites more water but loads the gearbox harder.
+Two motor options are on the bench.
+
+**Hiwonder TT motors** out of the mecanum chassis kit: 3-6 V, gear ratio
+1:120, four of them. These are the ones to use. 3-6 V means the USB power bank
+drives them directly with no boost, and 1:120 is slow and torquey, which is
+what a paddle wheel wants. Drive them with a **TB6612FNG, not an L298N**: at
+5 V the L298N's transistor drop leaves only about 3 V at the motor, and these
+are already slow.
+
+**OSEPP 25 mm, 1:45**, roughly 200 RPM: faster but wants 12 V, which there is
+no source for. Backup only.
+
+Either is far too slow for a propeller and about right for a paddle wheel, so
+the hull is a riverboat. Print the wheel with a 50 to 70 mm paddle radius;
+bigger bites more water but loads the gearbox harder.
+
+**Print the hub to fit the shaft you are actually using.** A TT motor has a
+double-D shaft, not a round one, and the kit ships four TT couplings. Print the
+paddle wheel around the coupling, or around the double-D profile. A round bore
+will spin freely on the shaft and the print is wasted.
+
+The mecanum wheels and the chassis plate are not useful on a boat. The motors,
+the couplings and the hardware are.
 
 One thing about `PADDLE_WHEELS 1` that matters in the water: **a rudder only
 bites while water is moving past it, so the hull cannot pivot in place.**

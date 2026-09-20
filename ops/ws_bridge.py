@@ -55,7 +55,11 @@ except Exception as _e:          # dispatch/triage.py missing or broken
     _triage_import_error = str(_e)
 
 HOST = "0.0.0.0"
-WS_PORT, INGEST_PORT, HTTP_PORT = 8765, 8766, 8767
+# Overridable so a second bridge can run beside the demo one, for stress runs
+# and for a hot spare. Defaults are what every doc and the dashboard assume.
+WS_PORT     = int(os.environ.get("TKB_WS_PORT", "8765"))
+INGEST_PORT = int(os.environ.get("TKB_INGEST_PORT", "8766"))
+HTTP_PORT   = int(os.environ.get("TKB_HTTP_PORT", "8767"))
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 # A telemetry frame is a few hundred bytes. Anything past this is a board at the
