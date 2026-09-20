@@ -410,8 +410,20 @@ components:
 
     UnitFrame:
       type: object
-      description: Vehicle pose and mission state.
-      required: [src, t, pose, mode, wp, obstacle_mm, mission, battery_pct]
+      description: |
+        Surface unit telemetry, built by `firmware/boat/boat.ino`.
+
+        **`pose` is nullable and on the real hardware it is always null.** The
+        unit floats, so there are no wheel ticks to integrate, and it runs
+        indoors, so there is no GNSS fix. A consumer that assumes coordinates
+        will break the first time it sees real hardware. The recorded mission
+        replayed by the dashboard does carry a pose, because it came from
+        `sim/main_native.cpp` where position is known by construction.
+
+        `wp` and `battery_pct` are optional for the same reason: there is no
+        waypoint follower and no fuel gauge on this build. They are absent
+        rather than zero, because zero is a measurement and absent is not.
+      required: [src, t, pose, mode, mission]
       properties:
         src:
           type: string
@@ -419,7 +431,10 @@ components:
           example: unit-01
         t: { type: number }
         pose:
-          type: object
+          type: [object, "null"]
+          description: |
+            Null when the unit has no position fix, which is the normal case
+            on hardware. Never synthesise a value to fill this.
           required: [lat, lon, hdg]
           properties:
             lat: { type: number }
@@ -434,12 +449,39 @@ components:
           enum: [IDLE, PLANNING, DRIVING, AVOIDING, ARRIVED, DELIVERED]
         wp:
           type: integer
-          description: Index of the waypoint being driven to.
+          description: |
+            Index of the waypoint being driven to. Present only on the
+            simulated mission; the hardware unit follows no waypoints.
         obstacle_mm:
+          type: [integer, "null"]
+          description: |
+            Range in mm to the nearest obstacle ahead, taken as the minimum of
+            the centre zones of the SEN0628 8x8 array. Null means no zone
+            returned a usable range, which is a sensor fault and is treated as
+            a reason to stop, never as open water. When it is null, `fault`
+            carries the reason.
+        fault:
+          type: string
+          description: Present only when the unit cannot measure. Human readable.
+          example: lidar not responding
+        mission: { type: string, example: m-live }
+        battery_pct:
           type: integer
-          description: Range to the nearest obstacle ahead.
-        mission: { type: string, example: m-7 }
-        battery_pct: { type: integer, minimum: 0, maximum: 100 }
+          minimum: 0
+          maximum: 100
+          description: Simulated mission only. This build has no battery monitor.
+        link:
+          type: object
+          required: [uplink, inference]
+          properties:
+            uplink: { type: boolean }
+            inference:
+              type: string
+              enum: [local, cloud]
+        decided_on:
+          type: string
+          enum: [device, cloud]
+          description: Where the unit's own stop/go decision was made.
 
     DatedFrame:
       type: object

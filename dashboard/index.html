@@ -991,8 +991,12 @@ resetPanel(P.central); resetPanel(P.edge);
 /* ---------------- ingest ---------------- */
 function kind(f) {
   if (f.hazard || f.water) return 'node';
-  if (f.pose) return 'unit';
   if (f.stage || f.route !== undefined || f.rejected) return 'dispatch';
+  // The recorded mission carries a pose on every unit frame. A real unit on
+  // water does not: there is no GPS indoors and no wheel odometry on a hull,
+  // so pose is null and the frame is identified by what it always carries.
+  // Keying only on pose is why live boat frames were being dropped as 'other'.
+  if (f.pose || typeof f.mode === 'string' || f.obstacle_mm !== undefined) return 'unit';
   return 'other';
 }
 function ingest(f) {
@@ -1026,15 +1030,23 @@ function applyFrame(p, f) {
     if (!p.node || (p.node.water && p.node.water.wet) !== wet) p.wet = { from: curWet(p, now), to: wet, t0: now };
     p.node = f; p.nodeAt = now; decision(p, now);
   } else if (k === 'unit') {
-    if (!f.pose || !Number.isFinite(f.pose.lat) || !Number.isFinite(f.pose.lon)) return;
-    if (p.unit && p.unit.mission !== f.mission) p.trail = [];
-    const xy = SIM.toXY(f.pose.lat, f.pose.lon), to = { x: xy.x, y: xy.y, hdg: +f.pose.hdg || 0 };
-    const from = curPose(p, now) || to;
-    const dur = p.unitAt ? Math.min(700, Math.max(40, now - p.unitAt)) : 1;
-    p.pose = { from, to, t0: now, dur };
+    if (p.unit && p.unit.mission !== f.mission) { p.trail = []; p.pose = null; }
+    // Mode, mission and obstacle range are real whether or not there is a fix,
+    // so the frame is always applied. Only the map marker needs coordinates,
+    // and a unit with no fix is drawn nowhere rather than drawn somewhere
+    // invented. A stale marker left on screen would be worse than no marker.
+    const fixed = f.pose && Number.isFinite(f.pose.lat) && Number.isFinite(f.pose.lon);
+    if (fixed) {
+      const xy = SIM.toXY(f.pose.lat, f.pose.lon), to = { x: xy.x, y: xy.y, hdg: +f.pose.hdg || 0 };
+      const from = curPose(p, now) || to;
+      const dur = p.unitAt ? Math.min(700, Math.max(40, now - p.unitAt)) : 1;
+      p.pose = { from, to, t0: now, dur };
+      const last = p.trail[p.trail.length - 1];
+      if (!last || Math.hypot(last.x - xy.x, last.y - xy.y) > 0.8) { p.trail.push(xy); if (p.trail.length > 700) p.trail.shift(); }
+    } else {
+      p.pose = null;
+    }
     p.unit = f; p.unitAt = now;
-    const last = p.trail[p.trail.length - 1];
-    if (!last || Math.hypot(last.x - xy.x, last.y - xy.y) > 0.8) { p.trail.push(xy); if (p.trail.length > 700) p.trail.shift(); }
   } else if (k === 'dispatch') {
     p.disp = f; p.dispAt = now; decision(p, now);
   } else return;
@@ -1331,7 +1343,14 @@ function drawMap(p, now) {
     ctx.restore();
   }
   ctx.textAlign = 'right'; ctx.fillStyle = pearl(.55);
-  ctx.fillText(pose ? `${(p.unit && p.unit.src) || 'unit'} ▲` : 'no robot pose yet', w - 4, 12);
+  // Three distinct states, and they must not be confused. A unit reporting
+  // with no fix is working; a unit that has never reported is not.
+  const unitLabel = pose
+    ? `${(p.unit && p.unit.src) || 'unit'} ▲`
+    : p.unit
+      ? `${p.unit.src || 'unit'} · ${p.unit.mode || 'reporting'} · no position fix`
+      : 'no unit reporting';
+  ctx.fillText(unitLabel, w - 4, 12);
 }
 
 /* ---------------- telemetry tail ---------------- */
