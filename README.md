@@ -1,21 +1,36 @@
-# Tanod
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/tanod-logo-dark.svg">
+    <img alt="Tanod" src="docs/assets/tanod-logo.svg" width="440">
+  </picture>
+</p>
 
-Flood-response logistics that keeps deciding after the network dies.
+<p align="center"><em>A flood crossing sensor that decides on the chip and shows the answer with no network at all.</em></p>
+
+---
 
 A sensor node sits on the bank and classifies the hazard **on the chip**, with no
 cloud round trip. It looks down at the water rather than reaching into it: a
 contact probe fails by corroding, and a corroded electrode reports DRY while the
 road is under water, which is the worst failure this system can have. A
-rangefinder can only fail by going silent, and silence is detectable. A dispatch layer turns that verdict into a route that avoids the
-crossings a ground unit cannot pass. The payload is a power bank, because power is
-what brings communication back, and a charged phone in a dead-tower zone is useless
-without a radio to talk to.
+rangefinder can only fail by going silent, and silence is detectable.
 
-In a flood the towers go down first. Every delivery system we could find phones home
-to decide what to do next. Ours does not, and the claim is checkable rather than
-asserted: every telemetry frame carries `decided_on`, which reads `device` or
-`cloud` and is never hardcoded. Cut the uplink and watch it stay on `device` while
-the central dispatch panel returns a real error from a real failed call.
+Then it delivers the answer where the network is not. The node blinks its verdict
+on a two second cycle, so a person standing at the crossing can read it with the
+uplink down, the laptop gone and the console closed.
+
+In a flood the towers go down first, and the things that answer "is this crossing
+passable right now" all phone home to do it. Ours does not, and the claim is
+checkable rather than asserted: the node's telemetry frames carry `decided_on`,
+which reads `device` or `cloud` and is computed rather than hardcoded. Cut the
+uplink and watch it stay on `device` while the central dispatch panel returns a
+real error from a real failed call.
+
+**The decision is autonomous. The locomotion is commanded.** There is no position
+estimate anywhere in the hardware path, so `pose` is null in every real unit frame.
+The classifier is threshold logic, not machine learning. The surface unit floats
+but has never run with its own depth sensor. All of that is stated again, in more
+detail, under [What runs today](#what-runs-today).
 
 **1.81 billion people are directly exposed to flood depths over 0.15 m in a
 1-in-100-year event, and 89% of them live in low- and middle-income countries**
@@ -51,8 +66,10 @@ Stated precisely, because a README that overclaims is worse than one that does n
 
 | Layer | What exists | State |
 |---|---|---|
-| **Field node** | `node/classify.cpp` four-state hazard classifier, `node/frame.cpp` telemetry, `firmware/uno_q/` running on an Arduino UNO Q | **Flashed and streaming real readings.** The STM32U585 runs `classify.cpp` unchanged, reading water depth from a downward-looking rangefinder and disturbance from an IMU. The sketch symlinks the same sources the simulator compiles, so board and simulator cannot drift. |
-| **Surface unit** | `firmware/boat/` reading an 8x8 matrix ToF, reusing `nav/avoid.cpp` unchanged; `ops/link_boat.py` carrying the node's verdict to it | Compiles and boot-tested on hardware, including the no-sensor fault path. Needs a second board to run with its sensor attached. |
+| **Field node** | `node/classify.cpp` four-state hazard classifier, `node/frame.cpp` telemetry, `firmware/uno_q/` running on an Arduino UNO Q, blinking its verdict locally | **Flashed and streaming real readings.** The STM32U585 runs `classify.cpp` unchanged, reading water depth from a downward-looking rangefinder and disturbance from an IMU. The sketch symlinks the same sources the simulator compiles, so board and simulator cannot drift. |
+| **Surface unit** | `firmware/boat/` reading an 8x8 matrix ToF; `nav/gap.cpp` choosing a direction from the field; `nav/avoid.cpp` unchanged when there is none; `ops/link_boat.py` carrying the node's verdict to it | Compiles in all three drive configurations and boot-tested on hardware, including the no-sensor fault path. Needs a second board to run with its sensor attached. |
+| **Steering** | `nav/gap.cpp`, follow-the-gap over the 8 columns of the ToF array | Runs. 13 native cases in `sim/gap_test.cpp` pass, including that an unknown column is never steered into. No map, no waypoint, no position estimate. |
+| **Tests** | `ops/stress.py`, `ops/preflight.sh` | 19 adversarial cases pass with no hardware attached. Preflight gates the demo. |
 | **Transport** | `ops/ws_bridge.py`, zero dependencies: WebSocket for consoles, TCP line ingest for producers, REST + OpenAPI | Runs. Survives malformed input, wrong baud rates, dead clients and client churn. |
 | **Dispatch** | `dispatch/triage.py` calling a real cloud model, with the node's own verdict as the fallback | Runs. The failure path is a real network failure, not a simulated one. |
 | **Console** | `dashboard/index.html`, single file, no framework | Runs. Central panel is driven by the real triage result, not by a button. |
@@ -101,6 +118,101 @@ GPS + IMU + wheel encoders
 `nav/` compiles unchanged for both targets. That is deliberate. Every line of
 navigation logic is testable on a laptop with no hardware attached, which is why
 the dashboard and the nav loop were both working before the hull existed.
+
+## Running it
+
+Three processes. They do **not** all have to be on one laptop, and on demo day
+they are not: whoever is holding a board runs a forwarder, and whoever is
+driving the console runs the bridge. That split is the entire reason
+`ops/serial_forward.py` exists.
+
+### Machine A, the bridge and the console
+
+```bash
+export OPENAI_API_KEY=...            # must be in THIS shell
+python3 ops/ws_bridge.py --serve-only
+```
+
+Then open `http://127.0.0.1:8767/?src=live`.
+
+Always use that URL with `?src=live`. The source is remembered in localStorage
+and a stray keypress switches it to canned REPLAY, which must never be on
+screen without someone saying the word "recorded" out loud first.
+
+Serving the console **from the bridge** is not optional. `POST /triage` is
+same-origin, so opening `dashboard/index.html` off the filesystem silently
+breaks the cloud panel.
+
+Find this machine's address once and tell everyone:
+
+```bash
+ipconfig getifaddr en0
+```
+
+### Machine B, whichever laptop holds the node
+
+```bash
+python3 ops/serial_forward.py --port /dev/cu.usbmodemXXXX --host <machine A>
+```
+
+### Machine C, if the surface unit has its own board
+
+```bash
+python3 ops/link_boat.py      --port /dev/cu.usbmodemBOAT               # first
+python3 ops/serial_forward.py --port /dev/cu.usbmodemBOAT --host <machine A>
+```
+
+`link_boat.py` opens the port **before** the forwarder on purpose. Opening a
+USB CDC port toggles DTR and resets the board, and you want that reset at
+startup rather than in the middle of a demo.
+
+### With no hardware at all
+
+The software path is the backup demo, so it has to stand alone:
+
+```bash
+python3 ops/serial_forward.py --fake --host 127.0.0.1
+```
+
+### Check it, do not assume it
+
+```bash
+sh ops/preflight.sh
+```
+
+It checks the bridge, whether the node has ever been seen, whether its frame is
+actually **fresh** (a cached frame from a dead sensor is byte-identical to a
+live one, so age is the only tell), whether the depth is saturated, whether
+CUT NETWORK was left latched from a previous run, whether the cloud path really
+answers, and whether the spec is served. Every failure prints the command that
+fixes it. Exit code is the failure count.
+
+### Known ways this breaks on the day
+
+- **The bridge IP moves.** Campus DHCP leases are an hour. Re-check before the demo.
+- **The macOS firewall prompts** on the first inbound connection to a new python
+  binary, and a teammate's first connection silently fails while the dialog waits.
+- **Campus wifi may isolate clients**, which blocks laptop-to-laptop entirely.
+  Prove the path with `--fake` before relying on it.
+- **A background browser tab freezes the console.** `requestAnimationFrame` is
+  suspended when the tab is hidden; it resumes on focus. This is not a bug and
+  it is not worth debugging at 9am.
+
+## Tests
+
+```bash
+python3 ops/stress.py      # 19 cases, whole system, no hardware attached
+make gaptest               # 13 cases, the steering algorithm, natively
+make && ./build/sim        # the navigation simulator
+```
+
+`ops/stress.py` gives every case its own bridge. Cases that hammer the ingest
+port leave a bridge busy draining for seconds afterwards, and a shared bridge
+turns that into phantom failures in whatever runs next. A suite that reports
+failures it cannot reproduce in isolation is worse than no suite.
+
+Measured on this hardware: sustained ingest of about **70,000 frames per
+second** with a console attached, roughly 14,000 times the 5 Hz demo rate.
 
 ## Build and run the simulator
 

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">TANOD eight-ray sun</title>
+  <defs><path id="ray" d="M-12.5-51L0-112 12.5-51Z"/></defs>
+  <g transform="translate(128 128)" fill="#FCD116">
+    <use xlink:href="#ray"/><use xlink:href="#ray" transform="rotate(45)"/>
+    <use xlink:href="#ray" transform="rotate(90)"/><use xlink:href="#ray" transform="rotate(135)"/>
+    <use xlink:href="#ray" transform="rotate(180)"/><use xlink:href="#ray" transform="rotate(225)"/>
+    <use xlink:href="#ray" transform="rotate(270)"/><use xlink:href="#ray" transform="rotate(315)"/>
+    <circle r="42"/>
+  </g>
+</svg>

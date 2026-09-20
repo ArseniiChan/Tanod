@@ -930,7 +930,13 @@ body.cut #cutBtn{background:#1C0A08;border-color:var(--crimson) !important;
 const SIM = window.TanodSim;
 const SITE = SIM.SITE;
 const qs = new URLSearchParams(location.search);
-const WS_URL = qs.get('ws') || `ws://${location.hostname || 'localhost'}:8765`;
+// Default to the origin this page was served from. The bridge upgrades
+// websockets on its HTTP port as well as on 8765, so same-origin works
+// locally and through a tunnel alike, and no ?ws= override is needed.
+// file:// has no usable host, so fall back to the historical default.
+const WS_URL = qs.get('ws') || (location.host
+  ? `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}`
+  : 'ws://localhost:8765');
 const CLOUD_RTT_MS = 380;     // MOCK/REPLAY only: a plausible number for canned data
 // In LIVE the central panel stops pretending. It calls the bridge, which really
 // calls a cloud model, and renders whatever actually came back including the
@@ -1174,6 +1180,27 @@ function renderHeader(now) {
   else html = `<span class="badge src" title="${esc(WS_URL)}">LIVE · ${ws.status === 'connected' ? 'connected' : ws.status === 'connecting' ? 'connecting' : `retry ${Math.max(0, Math.ceil((ws.retryAt - now) / 1000))} s`}</span>`;
   const sb = $('srcBadge');
   if (sb.innerHTML !== html) sb.innerHTML = html;
+
+  // The surface unit gets one line of chrome rather than a panel. Everything a
+  // judge needs to read off it while watching the hull move: what it decided,
+  // which way it is steering, and how much room it thinks it has. A steering
+  // command nobody can read is indistinguishable from a random one.
+  const u = P.edge.unit;
+  let ut;
+  if (!u) {
+    ut = 'no unit';
+  } else if (u.fault) {
+    ut = `${u.src} · FAULT · ${u.fault}`;
+  } else {
+    const st = Number.isFinite(+u.steer) ? (+u.steer).toFixed(2) : null;
+    const dir = st === null ? '' : (+st < -0.15 ? ' left' : (+st > 0.15 ? ' right' : ' ahead'));
+    ut = `${u.src} · ${u.mode || '—'}`
+       + (st !== null ? ` · steer ${(+st > 0 ? '+' : '')}${st}${dir}` : '')
+       + (Number.isFinite(+u.obstacle_mm) ? ` · ${u.obstacle_mm} mm` : '')
+       + (u.gap ? ` · ${u.gap}` : '');
+  }
+  const ru = $('rUnit');
+  if (ru && ru.textContent !== ut) ru.textContent = ut;
 }
 
 function renderRoutes() {
@@ -1577,7 +1604,7 @@ requestAnimationFrame(loop);
   <span><b class="k">SYS</b> tanod-ops</span>
   <span><b class="k">BUILD</b> <i id="rBuild">—</i></span>
   <span class="opt"><b class="k">NODE</b> node-01</span>
-  <span class="opt"><b class="k">UNIT</b> unit-01</span>
+  <span class="opt"><b class="k">UNIT</b> <i id="rUnit">no unit</i></span>
   <span><b class="k">LINK</b> <i class="led"></i><i class="lnk" id="rLink">UPLINK OK</i></span>
   <span class="opt"><b class="k">INFERENCE</b> <i id="rInf">LOCAL · GX10</i></span>
   <span class="grow"><b class="k">UPTIME</b> <i id="rUp">00:00:00</i> &nbsp; <b class="k">UTC</b> <i id="rClk">—</i></span>

@@ -42,6 +42,7 @@ default, or ws://<host>:8765 via ?ws= in the URL.
 Frames FROM the dashboard (the cut_network command) are printed to stderr, so
 the cut button is visible even before the firmware handles it.
 """
+import io as _io
 import base64, collections, hashlib, json, os, socket, struct, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -252,6 +253,13 @@ def serve_client(conn, addr):
     if not handshake(conn):
         conn.close()
         return
+    run_client(conn, addr)
+
+
+def run_client(conn, addr):
+    """Everything after the handshake. Split out so the HTTP port can upgrade
+    a connection whose request headers it has already consumed, without trying
+    to re-read a request that is no longer in the socket."""
     c = Client(conn, addr)
     with lock:
         clients.append(c)
@@ -445,6 +453,42 @@ class Api(BaseHTTPRequestHandler):
     do_HEAD = None          # replaced below, after do_GET exists
 
     def do_GET(self):
+        # A dashboard may also upgrade to a WebSocket on THIS port rather than
+        # WS_PORT. Two listening ports means two tunnels and two hostnames when
+        # the bridge is published through one, which forces the console to
+        # carry a ?ws= override and makes every viewer clear two warning pages.
+        # One port removes all of that. WS_PORT still listens, unchanged.
+        if self.headers.get("Upgrade", "").lower() == "websocket":
+            key = self.headers.get("Sec-WebSocket-Key")
+            if not key:
+                return self._json(400, {"error": "missing Sec-WebSocket-Key"})
+            accept = base64.b64encode(
+                hashlib.sha1(key.encode() + GUID.encode()).digest())
+            try:
+                self.wfile.write(
+                    b"HTTP/1.1 101 Switching Protocols\r\n"
+                    b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                    b"Sec-WebSocket-Accept: " + accept + b"\r\n\r\n")
+                self.wfile.flush()
+            except Exception:
+                return
+            # Take the socket away from the HTTP server entirely. dup() is not
+            # enough: socketserver calls shutdown(SHUT_WR) on the original,
+            # which tears down the CONNECTION, not just that descriptor, and
+            # the dashboard sees the socket close a moment after connecting.
+            # detach() leaves the server holding fileno -1, and its
+            # shutdown_request already swallows the resulting OSError.
+            fd = self.connection.detach()
+            conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM, fileno=fd)
+            # Nothing may touch the old buffers afterwards: handle_one_request
+            # flushes wfile unconditionally once this returns.
+            self.rfile = _io.BytesIO()
+            self.wfile = _io.BytesIO()
+            self.close_connection = True
+            threading.Thread(target=run_client,
+                             args=(conn, self.client_address),
+                             daemon=True).start()
+            return
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
         if path == "/health":
             with lock:
