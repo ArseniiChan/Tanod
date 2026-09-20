@@ -3,14 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tanod · Flood Dispatch</title>
+<title>TANOD · Fleet Ops</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link media="print" onload="this.media='all'" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,500;0,6..72,600;1,6..72,400&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <!--
-  Tanod dashboard. One file, no build step.
+  TANOD fleet console. One file, no build step.
 
-  Sources (buttons under CUT NETWORK, or keys L / M / R; C toggles the cut):
+  Layout: icon rail (far left) -> left panel (unit list / unit detail) ->
+  center map (flood zones, base, unit marker, routes) -> bottom-right layer
+  switcher. Settings rail icon opens the ops drawer: data source, CUT
+  NETWORK, route reasoning, raw telemetry.
+
+  Sources (ops drawer buttons, or keys L / M / R; C toggles the cut):
     LIVE    WebSocket, default ws://<host>:8765, override with ?ws=ws://host:port
     MOCK    in-page generator, same frame shapes as the hardware
     REPLAY  bundled recorded mission (#replay-data), shown with a REPLAY badge
@@ -25,407 +30,419 @@
     brain  {src,t,mission,stage,route:{id,name,len_m},why,rejected:[{id,name,reason}],decided_on}
 
   Frame out on CUT NETWORK (LIVE only): {"cmd":"cut_network","cut":true|false}
+
+  There is no command uplink to the unit (no RECALL/HOLD/REROUTE channel
+  exists in ops/ws_bridge.py). The card action buttons log operator intent
+  to the telemetry tail rather than pretend to command hardware that has no
+  receiver for it -- the point of this project is that the edge keeps
+  deciding on its own regardless of what a console says.
 -->
 <style>
 :root{
-  /* RA 8491 anchors */
-  --flag-blue:#0038A8;
-  --crimson:#CE1126;       /* IMPASSABLE and crisis only */
-  --gold:#FCD116;          /* the sun, and CAUTION */
-  --pearl:#F2EADF;         /* capiz pane fill */
-  --narra:#2A1D14;         /* the lattice, darker against cold ground */
-  --teal:#1C7982;          /* water, telemetry, passable */
+  /* ARC Command Cloud mirror: near-black map, violet chrome, orange hero */
+  --bg:#0A0A0F;
+  --tile:#0E0E14;
+  --tile-line:rgba(255,255,255,.035);
+  --panel:#111118;
+  --panel-2:#17171F;
+  --raised:#1C1C26;
+  --line:rgba(255,255,255,.08);
+  --line-2:rgba(255,255,255,.15);
+  --ink:#EDEDF3;
+  --ink-2:rgba(237,237,243,.66);
+  --ink-3:rgba(237,237,243,.40);
 
-  /* desaturated working values */
-  --ground-blue:#123C6B;
-  --ground:#080C11;        /* cold night outside the window */
-  --pane:#1A1713;          /* capiz pane, lit from behind */
-  --band-blue:#2A4F8C;
-  --pearl-rgb:242,234,223;
-  --teal-ink:#86CBD0;      /* sea teal lifted for text on dark */
-  --ink:#F2EADF;
-  --ink-2:rgba(242,234,223,.78);
-  --ink-3:rgba(242,234,223,.52);
-  --hair:rgba(242,234,223,.09);
-  --rail:#05080C;          /* system chrome */
-  --rail-ink:rgba(242,234,223,.55);
-  --shut:#0E0A07;
+  --violet:#7C6CF0;
+  --violet-dim:rgba(124,108,240,.18);
+  --violet-line:rgba(124,108,240,.5);
+  --red:#E5484D;
+  --red-dim:rgba(229,72,77,.16);
+  --amber:#F5C542;
+  --amber-dim:rgba(245,197,66,.14);
+  --orange:#FF6A2C;
+  --nominal:#4A4F5C;
+  --water:#3B82F6;
 
-  --serif:'Newsreader',Georgia,serif;
-  --sans:'IBM Plex Sans',system-ui,sans-serif;
-  --cond:'IBM Plex Sans Condensed','IBM Plex Sans',system-ui,sans-serif;
+  --sans:'Inter',system-ui,sans-serif;
+  --cond:'IBM Plex Sans Condensed','Inter',system-ui,sans-serif;
   --mono:'IBM Plex Mono',ui-monospace,Menlo,monospace;
 }
 *{box-sizing:border-box}
-html,body{margin:0;background:var(--ground);color:var(--ink)}
-body{font:400 18px/1.45 var(--sans);-webkit-font-smoothing:antialiased;overflow-x:hidden;
-  display:flex;flex-direction:column;height:100vh;min-height:860px}
+html,body{margin:0;background:var(--bg);color:var(--ink)}
+body{font:400 15px/1.45 var(--sans);-webkit-font-smoothing:antialiased;overflow:hidden;height:100vh;min-height:700px;
+  display:flex;flex-direction:column}
+button{font-family:inherit;color:inherit}
 
-/* ---------- flag band ---------- */
-.flagband{position:relative;z-index:2;flex:none;height:8px;overflow:hidden;cursor:help}
-.band{position:absolute;left:0;right:0;height:50%;transition:transform 400ms ease}
-.band.blue{top:0;background:var(--band-blue)}
-.band.red{top:50%;background:var(--crimson)}
-body.crisis .band.blue{transform:translateY(100%)}
-body.crisis .band.red{transform:translateY(-100%)}
+/* ---------- shell ---------- */
+.shell{position:relative;z-index:1;flex:1;min-height:0;display:grid;
+  grid-template-columns:72px 380px minmax(0,1fr);grid-template-rows:56px minmax(0,1fr);
+  background:var(--bg)}
 
-.app{position:relative;z-index:1;flex:1;min-height:0;display:grid;
-  grid-template-rows:auto auto minmax(0,1fr) auto;gap:14px;padding:14px 32px 18px}
+/* ---------- system diagnostics rail ---------- */
+.diagrail{flex:none;display:flex;align-items:center;gap:0;height:26px;padding:0 16px;
+  background:var(--panel);border-top:1px solid var(--line);
+  font:400 11px/1 var(--mono);color:var(--ink-3);letter-spacing:.02em;white-space:nowrap;overflow:hidden}
+.diagrail span{display:inline-flex;align-items:center;gap:6px;padding:0 14px;border-right:1px solid var(--line)}
+.diagrail span:first-child{padding-left:0}
+.diagrail .k{color:var(--ink-3);opacity:.65}
+.diagrail .grow{flex:1;border-right:none;justify-content:flex-end;padding-right:0}
+.diagrail .led{width:6px;height:6px;border-radius:50%;background:var(--violet)}
+.diagrail.cut .led{background:var(--red)}
+.diagrail.cut .lnk{color:var(--red)}
+@media (max-width:1100px){ .diagrail .opt{display:none} }
 
-/* ---------- header ---------- */
-.top{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:24px}
-.brand h1{margin:0;font:600 36px/1 var(--serif);letter-spacing:.16em}
-.brand p{margin:6px 0 0;font:italic 400 18px/1.2 var(--serif);color:var(--ink-3)}
-.sunbox{display:flex;align-items:center;gap:14px}
-.sunbox .cv{width:68px;height:68px}
-.sunword{font:600 20px/1.1 var(--cond);letter-spacing:.08em;text-transform:uppercase}
-.sunword small{display:block;margin-top:3px;font:400 16px/1.2 var(--sans);letter-spacing:0;text-transform:none;color:var(--ink-3)}
-.run{justify-self:end;display:flex;flex-direction:column;align-items:flex-end;gap:6px}
-.run-row{display:flex;align-items:center;gap:10px}
-.badge{display:inline-flex;align-items:center;gap:10px;font:700 20px/1 var(--cond);letter-spacing:.08em;
-  padding:9px 14px 8px;border:2px solid currentColor;border-radius:2px;white-space:nowrap}
-.badge .led{width:10px;height:10px;border-radius:50%;background:currentColor}
-.badge[data-mode=local]{color:var(--ink)}
-.badge[data-mode=local] .led{background:var(--teal-ink);box-shadow:0 0 0 3px rgba(134,203,208,.2)}
-.badge[data-mode=cloud]{color:var(--gold)}
-.badge[data-mode=none]{color:var(--ink-3)}
-.badge.replay{color:var(--gold);letter-spacing:.16em}
-.badge.src{color:var(--ink-2);font-weight:600;font-size:16px;border-width:1.5px}
-.run-sub{font:400 16px/1.2 var(--mono);color:var(--ink-3)}
-.crisis-note{display:none;font:600 16px/1 var(--cond);letter-spacing:.1em;color:var(--ink);background:var(--crimson);padding:6px 10px 5px}
-body.crisis .crisis-note{display:inline-block}
+/* ---------- icon nav rail ---------- */
+.navrail{grid-row:1 / 3;grid-column:1;display:flex;flex-direction:column;align-items:center;
+  gap:4px;padding:14px 0;background:var(--panel);border-right:1px solid var(--line)}
+.navrail .wordmark{width:36px;height:36px;border-radius:8px;background:var(--violet-dim);border:1px solid var(--violet-line);
+  color:var(--violet);display:flex;align-items:center;justify-content:center;font:700 14px/1 var(--cond);margin-bottom:14px}
+.navicon{width:44px;height:44px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;
+  border:0;border-radius:8px;background:transparent;color:var(--ink-3);cursor:pointer}
+.navicon svg{width:20px;height:20px}
+.navicon span{font:600 9px/1 var(--cond);letter-spacing:.06em;text-transform:uppercase}
+.navicon:hover{background:var(--panel-2);color:var(--ink-2)}
+.navicon[aria-pressed=true]{background:var(--violet-dim);color:var(--violet)}
+.navicon:focus-visible{outline:2px solid var(--violet);outline-offset:-2px}
+.navrail .spacer{flex:1}
 
-/* ---------- mission stepper ---------- */
-.stepper{display:grid;grid-template-columns:auto 1fr;align-items:center;gap:28px;
-  padding:10px 0 11px;border-top:1px solid var(--hair);border-bottom:1px solid var(--hair)}
-.mission{font:400 16px/1.2 var(--sans);color:var(--ink-3)}
-.mission b{display:block;margin-top:2px;font:500 22px/1 var(--mono);color:var(--ink)}
-.steps{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(5,1fr)}
-.steps li{position:relative;display:flex;flex-direction:column;align-items:center;gap:8px;color:var(--ink-3)}
-.steps li::before{content:"";position:absolute;top:8px;right:50%;width:100%;height:2px;background:var(--hair);z-index:0}
-.steps li:first-child::before{display:none}
-.steps li.done::before,.steps li.now::before{background:rgba(var(--pearl-rgb),.55)}
-.dot{position:relative;z-index:1;width:18px;height:18px;border-radius:50%;border:2px solid rgba(var(--pearl-rgb),.35);background:var(--ground)}
-.steps .nm{font:600 18px/1 var(--cond);letter-spacing:.08em;text-transform:uppercase}
-.steps li.done{color:var(--ink-2)}
-.steps li.done .dot{background:var(--pearl);border-color:var(--pearl)}
-.steps li.now{color:var(--ink)}
-.steps li.now .dot{background:var(--gold);border-color:var(--gold);box-shadow:0 0 0 5px rgba(252,209,22,.14)}
-.steps li.now .nm::after{content:" · now";color:var(--gold)}
+/* ---------- top bar ---------- */
+.topbar{grid-row:1;grid-column:2 / 4;display:flex;align-items:center;gap:18px;
+  padding:0 20px;background:var(--panel);border-bottom:1px solid var(--line)}
+.topbar .title{font:700 15px/1 var(--cond);letter-spacing:.1em;text-transform:uppercase;color:var(--ink)}
+.topbar .sub{font:400 12px/1 var(--sans);color:var(--ink-3);margin-left:8px}
+.status-pill{display:inline-flex;align-items:center;gap:7px;font:600 11px/1 var(--cond);letter-spacing:.08em;
+  text-transform:uppercase;padding:6px 10px;border-radius:20px;border:1px solid var(--line-2);color:var(--ink-2);white-space:nowrap}
+.status-pill .led{width:7px;height:7px;border-radius:50%;background:var(--nominal)}
+.status-pill[data-mode=local]{border-color:var(--violet-line);color:var(--violet)}
+.status-pill[data-mode=local] .led{background:var(--violet);box-shadow:0 0 0 3px var(--violet-dim)}
+.status-pill[data-mode=cloud]{border-color:rgba(245,197,66,.5);color:var(--amber)}
+.status-pill[data-mode=cloud] .led{background:var(--amber)}
+.topbar .grow{flex:1}
+.topbar .clock{font:400 12px/1 var(--mono);color:var(--ink-3);white-space:nowrap}
+.src-badge{font:600 11px/1 var(--cond);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-2);white-space:nowrap}
+.src-badge b{color:var(--violet)}
 
-/* ---------- the two windows ---------- */
-.split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:32px;min-height:0}
-.side{display:grid;grid-template-rows:auto minmax(0,1fr);gap:10px;min-height:0}
-.side-head{display:grid;grid-template-columns:40px 1fr auto;align-items:center;gap:14px}
-.side-head .cv{width:40px;height:40px}
-.side-head h2{margin:0;font:600 28px/1.1 var(--serif);letter-spacing:.02em}
-.side-head p{margin:2px 0 0;font:400 16px/1.2 var(--sans);color:var(--ink-3)}
-.chip{font:700 16px/1 var(--cond);letter-spacing:.1em;text-transform:uppercase;padding:7px 10px 6px;border:1.5px solid currentColor;border-radius:2px;white-space:nowrap}
-.chip[data-s=live]{color:var(--ink-2)}
-.chip[data-s=none],.chip[data-s=stale],.chip[data-s=frozen]{color:var(--ink-3)}
+/* ---------- left panel ---------- */
+.leftpanel{grid-row:2;grid-column:2;display:flex;flex-direction:column;min-height:0;
+  background:var(--panel);border-right:1px solid var(--line)}
+.lp-head{padding:14px 16px 10px;border-bottom:1px solid var(--line)}
+.lp-title-row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}
+.lp-title-row h1{margin:0;font:700 16px/1 var(--cond);letter-spacing:.08em;text-transform:uppercase}
+.seg{display:flex;border:1px solid var(--line-2);border-radius:7px;overflow:hidden}
+.seg button{padding:6px 12px;border:0;background:transparent;color:var(--ink-3);font:600 11px/1 var(--cond);
+  letter-spacing:.06em;text-transform:uppercase;cursor:pointer}
+.seg button[aria-pressed=true]{background:var(--violet);color:#100C24}
+.lp-search{position:relative;margin-bottom:10px}
+.lp-search input{width:100%;padding:8px 10px 8px 30px;border-radius:7px;border:1px solid var(--line);
+  background:var(--panel-2);color:var(--ink);font:400 13px/1 var(--sans)}
+.lp-search input::placeholder{color:var(--ink-3)}
+.lp-search input:focus{outline:none;border-color:var(--violet-line)}
+.lp-search svg{position:absolute;left:9px;top:50%;transform:translateY(-50%);width:14px;height:14px;color:var(--ink-3)}
+.lp-filter{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.lp-count{font:400 12px/1 var(--sans);color:var(--ink-3);white-space:nowrap}
+.chips{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.chip-f{padding:4px 9px;border-radius:12px;border:1px solid var(--line-2);background:transparent;
+  color:var(--ink-3);font:600 10px/1 var(--cond);letter-spacing:.05em;text-transform:uppercase;cursor:pointer}
+.chip-f[aria-pressed=true]{background:var(--panel-2);color:var(--ink);border-color:var(--line-2)}
+.lp-body{flex:1;min-height:0;overflow-y:auto;padding:10px}
 
-/* A capiz window: narra frame, thin shared muntins, shell panes. */
-.capiz{position:relative;min-height:0;display:grid;
-  grid-template-columns:minmax(0,1.65fr) minmax(0,1fr);grid-template-rows:auto minmax(170px,1fr);
-  gap:4px;background:var(--narra);border:6px solid var(--narra)}
-.pane{position:relative;min-width:0;min-height:0;overflow:hidden;padding:18px 22px;
-  --a:.12;
-  background:linear-gradient(180deg, rgba(242,234,223,var(--a)), rgba(242,234,223,calc(var(--a) * .4))) , var(--pane)}
-.pane > *{position:relative;z-index:1}
-.pane::after{content:"";position:absolute;inset:0;background:var(--shut);opacity:0;z-index:2;pointer-events:none;transition:opacity 400ms ease}
-.lbl{font:500 16px/1.2 var(--sans);color:var(--ink-3)}
-.meta{font:400 16px/1.3 var(--mono);color:var(--ink-3)}
-.cv{position:relative;min-width:0;min-height:0}
-.cv canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+/* unit card */
+.ucard{border-radius:10px;overflow:hidden;background:var(--panel-2);border:1px solid var(--line);margin-bottom:10px}
+.ucard-head{display:flex;align-items:center;gap:10px;padding:9px 12px;font:700 11px/1 var(--cond);
+  letter-spacing:.07em;text-transform:uppercase;color:#0B0B0E;background:var(--nominal)}
+.ucard-head.s-nominal{background:var(--nominal);color:#EDEDF3}
+.ucard-head.s-warning{background:var(--amber);color:#241C02}
+.ucard-head.s-critical{background:var(--red);color:#2A0405}
+.ucard-head .dot{width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
+.ucard-head .grow{flex:1}
+.ucard-body{padding:12px}
+.ucard-top{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.ucard-ic{width:34px;height:34px;border-radius:8px;background:var(--raised);display:flex;align-items:center;
+  justify-content:center;color:var(--orange);flex:none}
+.ucard-ic svg{width:18px;height:18px}
+.ucard-name{font:700 14px/1.2 var(--cond);letter-spacing:.03em}
+.ucard-mission{font:400 11px/1.3 var(--mono);color:var(--ink-3);margin-top:2px}
+.wtrack{display:flex;align-items:center;gap:4px;margin-bottom:10px}
+.wtrack .seg-dot{width:9px;height:9px;border-radius:50%;background:var(--panel);border:1.5px solid var(--line-2);flex:none}
+.wtrack .seg-dot.done{background:var(--violet);border-color:var(--violet)}
+.wtrack .seg-dot.now{background:var(--violet);border-color:var(--violet);box-shadow:0 0 0 3px var(--violet-dim)}
+.wtrack .seg-line{flex:1;height:2px;background:var(--line-2)}
+.wtrack .seg-line.done{background:var(--violet-line)}
+.ucard-meta{font:400 12px/1.5 var(--sans);color:var(--ink-2)}
+.ucard-meta .k{color:var(--ink-3)}
+.ucard-why{font:400 12px/1.45 var(--sans);color:var(--ink-2);margin-top:8px;padding-top:8px;border-top:1px solid var(--line)}
+.ucard-actions{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:10px}
+.ucard-actions button{padding:7px 0;border-radius:6px;border:1px solid var(--line-2);background:var(--raised);
+  color:var(--ink-2);font:600 10px/1 var(--cond);letter-spacing:.05em;text-transform:uppercase;cursor:pointer}
+.ucard-actions button:hover{background:var(--panel-2);color:var(--ink)}
 
-/* hazard */
-.hazard{display:flex;flex-direction:column}
-.hazard > *{flex-shrink:0}
-.hz-wash{position:absolute;inset:0;background:var(--crimson);opacity:0;transition:opacity 300ms;z-index:0 !important}
-.hz-word{margin:8px 0 12px;font:700 clamp(64px,4vw,78px)/.95 var(--cond);color:var(--ink-3)}
-.hz-why{font:400 21px/1.35 var(--sans);color:var(--ink);max-width:34ch}
-.hz-meta{margin-top:auto;padding-top:8px}
-.hazard[data-hz=SHALLOW_CROSSING] .hz-word{color:var(--teal-ink)}
-.hazard[data-hz=CONTAMINATED] .hz-word{color:var(--gold)}
-.hazard[data-hz=DRY] .hz-word{color:var(--teal-ink)}
-.hazard[data-hz=UNKNOWN] .hz-word{color:var(--gold)}
-.hazard[data-hz=IMPASSABLE] .hz-wash{opacity:.42}
-.hazard[data-hz=IMPASSABLE] .hz-word{color:var(--ink);text-shadow:0 2px 0 rgba(0,0,0,.25)}
-.crisis-note{white-space:nowrap}
-
-/* water */
-.water{display:flex;flex-direction:column;gap:10px}
-.water-body{flex:1;min-height:0;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px}
-.w-read{display:flex;flex-direction:column;justify-content:flex-end;padding-bottom:4px;min-width:0}
-.w-big{font:700 56px/1 var(--cond)}
-.w-big .of{font-size:24px;font-weight:500;color:var(--ink-3)}
-.w-sub{font:400 16px/1.3 var(--sans);color:var(--ink-3)}
-.w-mm{margin-top:10px;font:500 26px/1.1 var(--mono);color:var(--teal-ink)}
-.w-tds{margin-top:6px}
-
-/* map */
-.map{grid-column:1 / -1;display:flex;flex-direction:column;padding:14px 18px 10px}
-.map .cv{flex:1}
-.map .lbl{position:absolute;left:22px;top:14px}
-
-/* blackout (central, on cut) */
-.blackout{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:5;pointer-events:none;
-  text-align:center;padding:26px 40px 24px;background:rgba(8,6,4,.92);border:2px solid rgba(var(--pearl-rgb),.14);
-  opacity:0;transition:opacity 300ms ease;width:min(80%,560px)}
-.bo-kicker{font:600 16px/1.2 var(--cond);letter-spacing:.22em;color:var(--ink-3)}
-.bo-title{font:600 38px/1.1 var(--serif);color:var(--ink);margin:10px 0 12px}
-.bo-sub{font:400 17px/1.3 var(--mono);color:var(--ink-2)}
-
-/* THE moment: the central window's panes go dark and opaque; ours keep glowing */
-.side.dark .pane::after{opacity:.94;animation:lightsout 600ms ease-out calc(var(--i,0) * 60ms) both}
-.side.dark .pane > *{filter:grayscale(1) brightness(.7);opacity:.35;transition:filter 500ms,opacity 500ms}
-.side.dark .blackout{opacity:1;transition-delay:280ms}
-.side.dark .side-head{opacity:.55;transition:opacity 500ms}
-@keyframes lightsout{0%{opacity:0}16%{opacity:.6}26%{opacity:.15}44%{opacity:.85}58%{opacity:.6}100%{opacity:.94}}
-body.cut #p-edge .pane{--lift:.025}
-#p-edge .pane{background:linear-gradient(180deg, rgba(242,234,223,calc(var(--a) + var(--lift,0))), rgba(242,234,223,calc(var(--a) * .4 + var(--lift,0)))), var(--pane)}
-
-/* ---------- bottom: the control, the reasons, the frames ---------- */
-.bottom{display:grid;grid-template-columns:320px minmax(0,1.55fr) minmax(0,.8fr);gap:32px;height:196px;
-  padding-top:14px;border-top:1px solid var(--hair)}
-.control{display:flex;flex-direction:column;gap:12px;min-height:0}
-#cutBtn{flex:1;display:grid;grid-template-columns:auto 1fr;align-items:center;gap:16px;text-align:left;cursor:pointer;
-  padding:0 20px;border:0;border-radius:3px;background:var(--pearl);color:#241910;
-  box-shadow:0 5px 0 #8F8274;transform:translateY(0);
-  transition:transform 90ms ease, box-shadow 90ms ease, background-color 200ms, color 200ms}
-#cutBtn:hover{background:#FFF8EE}
-#cutBtn:active{transform:translateY(5px);box-shadow:0 1px 0 #9A8C7C, 0 3px 8px rgba(0,0,0,.4)}
-#cutBtn:focus-visible{outline:3px solid var(--gold);outline-offset:4px}
-#cutBtn svg{width:40px;height:40px}
-#cutBtn .cb-main{display:block;font:700 30px/1 var(--cond);letter-spacing:.05em;white-space:nowrap}
-#cutBtn .cb-sub{display:block;margin-top:6px;font:500 16px/1.25 var(--sans);opacity:.75}
-#cutBtn[aria-pressed=true]{background:#16100B;color:var(--gold);transform:translateY(5px);
-  box-shadow:inset 0 0 0 2px var(--gold), 0 1px 0 #000}
-#cutBtn[aria-pressed=true] .cb-sub{color:var(--ink-2);opacity:1}
-.srcs{display:grid;grid-template-columns:repeat(3,1fr);border:1.5px solid var(--hair);border-radius:2px}
-.srcs button{font:600 16px/1 var(--cond);letter-spacing:.12em;padding:9px 0 8px;border:0;cursor:pointer;background:transparent;color:var(--ink-3)}
-.srcs button + button{border-left:1.5px solid var(--hair)}
-.srcs button[aria-pressed=true]{background:rgba(var(--pearl-rgb),.14);color:var(--ink)}
-.srcs button:focus-visible{outline:2px solid var(--gold);outline-offset:-2px}
-
-.sec-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:10px}
-.sec-head h3{margin:0;font:600 22px/1 var(--serif);letter-spacing:.02em}
-.routes{min-height:0;overflow:hidden;display:flex;flex-direction:column}
-.rt{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:5px}
-.rt li{display:grid;grid-template-columns:30px 1fr;gap:4px 10px;align-items:baseline}
-.rt .ic{font:700 20px/1 var(--sans);text-align:center}
-.rt .nm{font:600 19px/1.25 var(--sans)}
-.rt .nm small{font:400 16px var(--mono);color:var(--ink-3);margin-left:8px}
-.rt .rs{grid-column:2;font:400 17px/1.3 var(--sans);color:var(--ink-2)}
-.rt li{row-gap:1px}
-.rt li.take .ic{color:var(--teal-ink)}
+/* unit detail (Detail toggle) */
+.udetail{padding:0 2px}
+.ud-block{background:var(--panel-2);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:10px}
+.ud-block h3{margin:0 0 8px;font:600 11px/1 var(--cond);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3)}
+.ud-water{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:end}
+.ud-big{font:700 34px/1 var(--cond)}
+.ud-big .of{font-size:15px;font-weight:500;color:var(--ink-3)}
+.ud-sub{font:400 11px/1.3 var(--sans);color:var(--ink-3)}
+.ud-mm{margin-top:6px;font:500 16px/1 var(--mono);color:var(--water)}
+.ud-tds{margin-top:3px;font:400 12px var(--mono);color:var(--ink-3)}
+.gaugewrap{width:64px;height:96px;position:relative}
+.gaugewrap canvas{position:absolute;inset:0;width:100%;height:100%}
+.rt{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.rt li{display:grid;grid-template-columns:18px 1fr;gap:2px 8px;align-items:baseline}
+.rt .ic{font:700 13px/1 var(--sans);text-align:center}
+.rt .nm{font:600 12px/1.3 var(--sans)}
+.rt .nm small{font:400 11px var(--mono);color:var(--ink-3);margin-left:6px}
+.rt .rs{grid-column:2;font:400 11px/1.3 var(--sans);color:var(--ink-3)}
+.rt li.take .ic{color:var(--violet)}
 .rt li.no .ic{color:var(--ink-3)}
-.rt li.blocked .ic{color:var(--pearl);background:var(--crimson);border-radius:2px}
-.rt li.no .nm,.rt li.blocked .nm{font-weight:500;color:var(--ink-2)}
-.rt-state{font:700 16px/1 var(--cond);letter-spacing:.1em;margin-left:8px}
-.rt-empty{font:400 18px/1.4 var(--sans);color:var(--ink-3)}
-.frames{min-height:0;display:flex;flex-direction:column}
-.frames .sec-head{flex-direction:column;align-items:flex-start;gap:6px}
-.rate{font:400 16px/1.2 var(--mono);color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-#tail{flex:1;min-height:0;overflow:hidden;font:400 16px/1.5 var(--mono);color:var(--ink-3);
-  -webkit-mask-image:linear-gradient(to bottom, transparent 0, #000 45%);mask-image:linear-gradient(to bottom, transparent 0, #000 45%)}
-.tl{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tl .ts{color:rgba(var(--pearl-rgb),.35)}
-.tl.k-node{color:var(--teal-ink)}
-.tl.k-dispatch{color:var(--ink-2)}
-.tl.note{color:var(--gold)}
-.tl:last-child{color:var(--ink)}
-.tl.k-node:last-child{color:#B3E2E6}
+.rt li.blocked .ic{color:#2A0405;background:var(--red);border-radius:3px}
+.rt-empty{font:400 12px/1.4 var(--sans);color:var(--ink-3)}
 
-/* ---------- smaller screens ---------- */
-@media (max-width:1180px){
-  body{height:auto;min-height:0}
-  .split{grid-template-columns:minmax(0,1fr)}
-  .capiz{height:600px}
-  .bottom{grid-template-columns:1fr;height:auto}
-  .control{height:190px}
-  .frames{height:220px}
-  .top{grid-template-columns:1fr auto}
-  .run{grid-column:1 / -1;justify-self:start;align-items:flex-start}
-}
-@media (max-width:640px){
-  .app{padding:12px 16px}
-  .steps .nm{font-size:16px;letter-spacing:0}
-  .steps li.now .nm::after{content:""}
-  .stepper{grid-template-columns:1fr}
-  .capiz{grid-template-columns:1fr;grid-template-rows:auto 220px 260px;height:auto}
-}
+/* ---------- map ---------- */
+.mapwrap{grid-row:2;grid-column:3;position:relative;min-width:0;min-height:0;background:var(--bg);
+  display:flex;gap:2px}
+.mappane{position:relative;flex:1;min-width:0;min-height:0;overflow:hidden;background:var(--bg)}
+.mappane canvas{position:absolute;inset:0;width:100%;height:100%;display:block;transition:filter 400ms ease}
+.mappane.frozen canvas{filter:grayscale(1) brightness(.5)}
+.mappane.frozen .hud{opacity:.5;transition:opacity 400ms ease}
+.pane-label{position:absolute;left:14px;top:12px;z-index:3;font:600 10px/1 var(--cond);letter-spacing:.08em;
+  text-transform:uppercase;color:var(--ink-3)}
+
+/* HUD card: hazard + gauge + status, overlaid on each map pane */
+.hud{position:absolute;left:14px;top:34px;z-index:3;width:236px;max-width:calc(100% - 28px);
+  background:rgba(17,17,24,.86);backdrop-filter:blur(6px);border:1px solid var(--line);border-radius:10px;padding:12px}
+.hud-toprow{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+.hud-chip{font:700 10px/1 var(--cond);letter-spacing:.08em;text-transform:uppercase;padding:4px 8px;border-radius:20px;
+  border:1px solid var(--line-2);color:var(--ink-3);white-space:nowrap}
+.hud-chip[data-s=live]{border-color:var(--violet-line);color:var(--violet)}
+.hud-chip[data-s=frozen]{border-color:rgba(229,72,77,.5);color:var(--red)}
+.hud-word{font:700 20px/1.05 var(--cond);letter-spacing:.01em;margin-bottom:6px}
+.hud-word[data-hz=SHALLOW_CROSSING]{color:var(--violet)}
+.hud-word[data-hz=DRY]{color:var(--violet)}
+.hud-word[data-hz=CONTAMINATED]{color:var(--amber)}
+.hud-word[data-hz=UNKNOWN]{color:var(--amber)}
+.hud-word[data-hz=IMPASSABLE]{color:var(--red)}
+.hud-word[data-hz=NONE]{color:var(--ink-3)}
+.hud-why{font:400 12px/1.4 var(--sans);color:var(--ink-2);margin-bottom:8px}
+.hud-body{display:flex;gap:10px;align-items:flex-end}
+.hud-gaugewrap{width:34px;height:64px;flex:none}
+.hud-gaugewrap canvas{width:100%;height:100%;display:block}
+.hud-meta{font:400 10.5px/1.4 var(--mono);color:var(--ink-3)}
+
+.map-blackout{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);z-index:5;pointer-events:none;
+  text-align:center;padding:10px 18px;background:rgba(20,4,5,.9);border:1px solid rgba(229,72,77,.5);border-radius:8px;
+  opacity:0;transition:opacity 300ms ease}
+.map-blackout.show{opacity:1}
+.mb-kicker{font:700 11px/1.2 var(--cond);letter-spacing:.14em;color:var(--red)}
+.mb-sub{font:400 11px/1.3 var(--mono);color:var(--ink-2);margin-top:3px}
+
+/* layer switcher, bottom-right */
+.layers{position:absolute;right:16px;bottom:16px;z-index:4;display:flex;align-items:flex-end;gap:10px}
+.wind{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px 12px;
+  font:400 11px/1.3 var(--mono);color:var(--ink-3);white-space:nowrap}
+.wind b{color:var(--ink-2);font-weight:600}
+.layerbar{display:flex;gap:6px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:6px}
+.layer-thumb{width:52px;display:flex;flex-direction:column;align-items:center;gap:4px;border:0;background:transparent;
+  cursor:pointer;color:var(--ink-3)}
+.layer-thumb .sw{width:52px;height:34px;border-radius:6px;border:1.5px solid var(--line-2);background:var(--tile)}
+.layer-thumb[aria-pressed=true] .sw{border-color:var(--violet);box-shadow:0 0 0 2px var(--violet-dim)}
+.layer-thumb[aria-pressed=true]{color:var(--ink)}
+.layer-thumb span{font:600 9px/1 var(--cond);letter-spacing:.04em;text-transform:uppercase}
+.sw.zone{background:linear-gradient(135deg,#171724,#0E0E14)}
+.sw.flood{background:linear-gradient(180deg,rgba(59,130,246,.55),#0E0E14)}
+.sw.sat{background:repeating-linear-gradient(45deg,#1a2a1a,#1a2a1a 4px,#132013 4px,#132013 8px)}
+.sw.weather{background:linear-gradient(180deg,#26303e,#0E0E14)}
+.sw.mapl{background:linear-gradient(135deg,#1c1c26,#101018)}
+
+/* ---------- ops drawer (Settings) ---------- */
+.drawer{position:fixed;top:0;right:-420px;width:400px;height:100vh;z-index:20;background:var(--panel);
+  border-left:1px solid var(--line);display:flex;flex-direction:column;transition:right 220ms ease;
+  box-shadow:-20px 0 60px -20px rgba(0,0,0,.6)}
+.drawer.open{right:0}
+.drawer-head{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--line)}
+.drawer-head h2{margin:0;font:700 14px/1 var(--cond);letter-spacing:.08em;text-transform:uppercase}
+.drawer-close{border:0;background:transparent;color:var(--ink-3);cursor:pointer;font-size:18px;line-height:1;padding:4px}
+.drawer-close:hover{color:var(--ink)}
+.drawer-body{flex:1;min-height:0;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:16px}
+.srcs{display:grid;grid-template-columns:repeat(3,1fr);border:1px solid var(--line-2);border-radius:8px;overflow:hidden}
+.srcs button{font:600 11px/1 var(--cond);letter-spacing:.08em;padding:9px 0;border:0;cursor:pointer;background:transparent;color:var(--ink-3)}
+.srcs button+button{border-left:1px solid var(--line)}
+.srcs button[aria-pressed=true]{background:var(--violet-dim);color:var(--violet)}
+#cutBtn{display:flex;align-items:center;gap:12px;text-align:left;cursor:pointer;padding:12px 14px;
+  border:1px solid var(--line-2);border-radius:9px;background:var(--panel-2);color:var(--ink)}
+#cutBtn svg{width:26px;height:26px;color:var(--red);flex:none}
+#cutBtn .cb-main{display:block;font:700 13px/1 var(--cond);letter-spacing:.05em}
+#cutBtn .cb-sub{display:block;margin-top:3px;font:400 11px/1.3 var(--sans);color:var(--ink-3)}
+#cutBtn[aria-pressed=true]{background:var(--red-dim);border-color:rgba(229,72,77,.55)}
+#cutBtn[aria-pressed=true] .cb-main{color:var(--red)}
+.sec-head{font:600 11px/1 var(--cond);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);margin-bottom:8px}
+.rate{font:400 11px/1.2 var(--mono);color:var(--ink-3)}
+#tail{max-height:220px;overflow-y:auto;font:400 11px/1.5 var(--mono);color:var(--ink-3)}
+.tl{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tl .ts{color:var(--ink-3);opacity:.6}
+.tl.k-node{color:var(--water)}
+.tl.k-dispatch{color:var(--ink-2)}
+.tl.note{color:var(--amber)}
+.tl:last-child{color:var(--ink)}
+
 @media (prefers-reduced-motion: reduce){
   *,*::before,*::after{transition:none !important;animation:none !important}
 }
-
-/* ============================================================
-   Operations refinement pass.
-   Cold ground, lit panes, one primary side, system chrome.
-   ============================================================ */
-
-/* Numbers that change must not jitter. */
-.w-big,.w-mm,.mission b,.meta,.run-sub,.bo-sub,.rail{font-variant-numeric:tabular-nums}
-
-/* Hairlines read as instrument. 2px outlines read as a toy. */
-.badge{border-width:1px;padding:8px 13px 7px}
-.chip{border-width:1px}
-.blackout{border-width:1px}
-
-/* Hierarchy: the edge side is the subject. The central side is the control. */
-.split{grid-template-columns:minmax(0,1fr) minmax(0,1.06fr)}
-#sideCloud .capiz{border-color:#20160F;background:#20160F}
-#sideCloud .pane{--a:.075}
-#sideCloud .side-head h2,#sideCloud .side-head p{opacity:.72}
-
-/* Lit panes get a faint warm bleed past the lattice, like real shell at night. */
-.capiz{box-shadow:0 0 0 1px rgba(0,0,0,.6), 0 18px 60px -28px rgba(242,214,170,.22)}
-#sideCloud .capiz{box-shadow:0 0 0 1px rgba(0,0,0,.6)}
-.side.dark .capiz{box-shadow:0 0 0 1px rgba(0,0,0,.6)}
-
-/* The cut switch is an instrument, not a cream slab. */
-.cutbtn,button.cut,#cutBtn{font-variant-numeric:tabular-nums}
-
-/* System rail: the chrome that says this is a system, not a page. */
-.rail{flex:none;display:flex;align-items:center;gap:0;height:30px;padding:0 32px;
-  background:var(--rail);border-top:1px solid var(--hair);
-  font:400 13px/1 var(--mono);color:var(--rail-ink);letter-spacing:.02em;white-space:nowrap;overflow:hidden}
-.rail span{display:inline-flex;align-items:center;gap:7px;padding:0 16px;
-  border-right:1px solid rgba(242,234,223,.07)}
-.rail span:first-child{padding-left:0}
-.rail .k{color:rgba(242,234,223,.32)}
-.rail .grow{flex:1;border-right:none;justify-content:flex-end;padding-right:0}
-.rail .led{width:6px;height:6px;border-radius:50%;background:var(--teal-ink)}
-.rail.cut .led{background:var(--crimson)}
-.rail.cut .lnk{color:var(--crimson)}
-@media (max-width:1100px){ .rail .opt{display:none} }
-
-/* The cut control is an instrument on a console, not a cream slab.
-   It is the one thing a judge touches, so it must look touchable and
-   belong to the same machine as everything around it. */
-#cutBtn{background:#14100C;color:var(--ink);
-  border:1px solid rgba(242,234,223,.18) !important;
-  box-shadow:0 4px 0 #0A0704, inset 0 1px 0 rgba(242,234,223,.06) !important}
-#cutBtn:hover{background:#1B1611}
-#cutBtn svg{color:var(--crimson)}
-body.cut #cutBtn{background:#1C0A08;border-color:var(--crimson) !important;
-  box-shadow:0 4px 0 #0A0302, inset 0 0 40px -12px rgba(206,17,38,.55) !important}
-
-/* Meta lines are chrome. They were wrapping mid-phrase and pulling focus. */
-.hz-meta{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.w-sub,.w-tds{font-size:15px}
-
-
 </style>
 </head>
 <body>
 
-<div class="flagband" id="flagband" role="img"
-     aria-label="Flag bands, blue above red. Inverts to red above blue when a crossing is impassable."
-     title="Blue above red is the Philippine flag in peacetime. Republic Act 8491 makes the Philippines the only country that flies its flag inverted, red above blue, to signal a state of war. This band inverts when any crossing reaches IMPASSABLE.">
-  <div class="band blue"></div><div class="band red"></div>
-</div>
-
-<div class="app">
-  <header class="top">
-    <div class="brand">
-      <h1>TANOD</h1>
-      <p>Flood dispatch that keeps deciding when the network dies.</p>
-    </div>
-    <div class="sunbox">
-      <div class="cv" title="Eight rays for the eight provinces that first revolted: Manila, Cavite, Bulacan, Pampanga, Nueva Ecija, Bataan, Laguna and Batangas (NCCA). Rotates while decisions arrive, pulses on each one, freezes when the decision source is lost."><canvas id="sunMain" aria-hidden="true"></canvas></div>
-      <div class="sunword" id="sunLabel">Awaiting node<small>no decision yet</small></div>
-    </div>
-    <div class="run">
-      <div class="run-row">
-        <span class="crisis-note">FLAG INVERTED · IMPASSABLE</span>
-        <span id="srcBadge"></span>
-        <span class="badge" id="runBadge" data-mode="none"><span class="led"></span><span id="runText">AWAITING NODE</span></span>
-      </div>
-      <div class="run-sub" id="runSub">decided_on — · uplink —</div>
-    </div>
-  </header>
-
-  <nav class="stepper" aria-label="Mission stages">
-    <div class="mission">Mission<b id="missionId">—</b></div>
-    <ol class="steps" id="steps">
-      <li><span class="dot"></span><span class="nm">Requested</span></li>
-      <li><span class="dot"></span><span class="nm">Triaged</span></li>
-      <li><span class="dot"></span><span class="nm">Dispatched</span></li>
-      <li><span class="dot"></span><span class="nm">En route</span></li>
-      <li><span class="dot"></span><span class="nm">Delivered</span></li>
-    </ol>
+<div class="shell">
+  <nav class="navrail" aria-label="Sections">
+    <div class="wordmark" title="TANOD">TN</div>
+    <button class="navicon" type="button" data-nav="fleet" aria-pressed="true" title="Fleet">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 15l1.5-5A2 2 0 0 1 6.4 8.5h11.2A2 2 0 0 1 19.5 10l1.5 5"/><rect x="2.5" y="15" width="19" height="4.5" rx="1.5"/><circle cx="7" cy="19.5" r="1.4"/><circle cx="17" cy="19.5" r="1.4"/></svg>
+      <span>Fleet</span>
+    </button>
+    <button class="navicon" type="button" data-nav="zones" aria-pressed="false" title="Zones">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2 3 6.5v6c0 5 4 8.5 9 9.5 5-1 9-4.5 9-9.5v-6L12 2Z"/></svg>
+      <span>Zones</span>
+    </button>
+    <button class="navicon" type="button" data-nav="flood" aria-pressed="false" title="Flood depth">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 18c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0M4 12c1.5 1.3 3 1.3 4.5 0s3-1.3 4.5 0 3 1.3 4.5 0 3-1.3 4.5 0M12 2v7"/></svg>
+      <span>Flood</span>
+    </button>
+    <button class="navicon" type="button" data-nav="payload" aria-pressed="false" title="Payload">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="8" width="16" height="12" rx="1.5"/><path d="M4 12h16M12 8V5a2 2 0 0 1 2-2h0"/></svg>
+      <span>Payload</span>
+    </button>
+    <div class="spacer"></div>
+    <button class="navicon" type="button" data-nav="settings" aria-pressed="false" title="Settings, source and cut network">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 13.5a7.6 7.6 0 0 0 0-3l2-1.4-2-3.4-2.3.9a7.6 7.6 0 0 0-2.6-1.5L14 2.5h-4l-.5 2.6a7.6 7.6 0 0 0-2.6 1.5l-2.3-.9-2 3.4 2 1.4a7.6 7.6 0 0 0 0 3l-2 1.4 2 3.4 2.3-.9c.77.66 1.65 1.17 2.6 1.5l.5 2.6h4l.5-2.6a7.6 7.6 0 0 0 2.6-1.5l2.3.9 2-3.4-2-1.4Z"/></svg>
+      <span>Config</span>
+    </button>
   </nav>
 
-  <main class="split">
-    <section class="side" id="p-central" aria-label="Central dispatch, counterfactual"
-      title="Counterfactual: the same frames, routed through a cloud dispatch server. Cut the network and it has nothing to decide with."></section>
-    <section class="side" id="p-edge" aria-label="Edge autonomy, Tanod"></section>
-  </main>
+  <header class="topbar">
+    <span class="title">TANOD</span>
+    <span class="sub">Flood dispatch that keeps deciding when the network dies</span>
+    <div class="grow"></div>
+    <span class="src-badge" id="srcBadge"></span>
+    <span class="status-pill" id="runBadge" data-mode="none"><span class="led"></span><span id="runText">AWAITING NODE</span></span>
+    <span class="clock" id="topClock">—</span>
+  </header>
 
-  <footer class="bottom">
-    <div class="control">
-      <button id="cutBtn" type="button" aria-pressed="false" title="Keyboard: C">
-        <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" aria-hidden="true">
-          <path d="M8 34a14 14 0 0 1 14-14"/><path d="M4 20a22 22 0 0 1 22-14"/><circle cx="10" cy="38" r="2.6" fill="currentColor" stroke="none"/>
-          <path d="M30 26l12 12M42 26L30 38"/>
-        </svg>
-        <span><span class="cb-main">CUT NETWORK</span><span class="cb-sub">Sever the uplink to the cloud</span></span>
-      </button>
+  <aside class="leftpanel">
+    <div class="lp-head">
+      <div class="lp-title-row">
+        <h1>Units</h1>
+        <div class="seg" role="group" aria-label="View">
+          <button type="button" data-view="detail" aria-pressed="true">Detail</button>
+          <button type="button" data-view="all" aria-pressed="false">All</button>
+        </div>
+      </div>
+      <div class="lp-search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+        <input id="unitSearch" type="text" placeholder="Search unit or mission">
+      </div>
+      <div class="lp-filter">
+        <span class="lp-count" id="unitCount">1 unit</span>
+        <div class="chips" role="group" aria-label="Filter by status">
+          <button class="chip-f" type="button" data-filter="all" aria-pressed="true">All</button>
+          <button class="chip-f" type="button" data-filter="nominal" aria-pressed="false">Nominal</button>
+          <button class="chip-f" type="button" data-filter="warning" aria-pressed="false">Warning</button>
+          <button class="chip-f" type="button" data-filter="critical" aria-pressed="false">Critical</button>
+        </div>
+      </div>
+    </div>
+    <div class="lp-body" id="lpBody"></div>
+  </aside>
+
+  <main class="mapwrap" id="mapwrap">
+    <section class="mappane" data-panel="edge" aria-label="Edge autonomy, decides on node-01 and the GX10">
+      <canvas id="mapEdge" role="img" aria-label="Edge map: staging base, flood zones, routes and the unit, decided on device"></canvas>
+      <div class="pane-label">Edge autonomy · node-01 + GX10 · no cloud</div>
+      <div class="hud">
+        <div class="hud-toprow"><span class="hud-chip" id="edgeChip" data-s="none">Awaiting node</span></div>
+        <div class="hud-word" id="edgeWord" data-hz="NONE">AWAITING NODE</div>
+        <div class="hud-why" id="edgeWhy"></div>
+        <div class="hud-body">
+          <div class="hud-gaugewrap"><canvas id="edgeGauge"></canvas></div>
+          <div class="hud-meta" id="edgeMeta"></div>
+        </div>
+      </div>
+    </section>
+    <section class="mappane" data-panel="cloud" aria-label="Central dispatch, counterfactual: needs the uplink">
+      <canvas id="mapCloud" role="img" aria-label="Cloud map: same frames, one round trip later, goes dark on cut"></canvas>
+      <div class="pane-label">Central dispatch · counterfactual · needs the uplink</div>
+      <div class="hud">
+        <div class="hud-toprow"><span class="hud-chip" id="cloudChip" data-s="none">Awaiting node</span></div>
+        <div class="hud-word" id="cloudWord" data-hz="NONE">AWAITING NODE</div>
+        <div class="hud-why" id="cloudWhy"></div>
+        <div class="hud-body">
+          <div class="hud-gaugewrap"><canvas id="cloudGauge"></canvas></div>
+          <div class="hud-meta" id="cloudMeta"></div>
+        </div>
+      </div>
+      <div class="map-blackout" id="cloudBlackout">
+        <div class="mb-kicker">UPLINK CUT · DISPATCH SERVER UNREACHABLE</div>
+        <div class="mb-sub" id="cloudBlackoutSub">no decision since the cut</div>
+      </div>
+    </section>
+    <div class="layers">
+      <div class="wind">WIND <b id="windReadout">— no sensor</b></div>
+      <div class="layerbar" role="group" aria-label="Map layer">
+        <button class="layer-thumb" type="button" data-layer="zone" aria-pressed="true"><span class="sw zone"></span><span>Zone</span></button>
+        <button class="layer-thumb" type="button" data-layer="flood" aria-pressed="false"><span class="sw flood"></span><span>Flood depth</span></button>
+        <button class="layer-thumb" type="button" data-layer="sat" aria-pressed="false"><span class="sw sat"></span><span>Satellite</span></button>
+        <button class="layer-thumb" type="button" data-layer="weather" aria-pressed="false"><span class="sw weather"></span><span>Weather</span></button>
+        <button class="layer-thumb" type="button" data-layer="mapl" aria-pressed="false"><span class="sw mapl"></span><span>Map</span></button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="diagrail" id="diagRail">
+  <span><b class="k">SYS</b> tanod-ops</span>
+  <span><b class="k">BUILD</b> <i id="diagBuild">—</i></span>
+  <span class="opt"><b class="k">NODE</b> node-01</span>
+  <span class="opt"><b class="k">UNIT</b> unit-01</span>
+  <span><b class="k">LINK</b> <i class="led"></i><i class="lnk" id="diagLink">UPLINK OK</i></span>
+  <span class="opt"><b class="k">INFERENCE</b> <i id="diagInf">—</i></span>
+  <span class="grow"><b class="k">UPTIME</b> <i id="diagUp">00:00:00</i> &nbsp; <b class="k">UTC</b> <i id="diagClk">—</i></span>
+</div>
+
+<div class="drawer" id="drawer">
+  <div class="drawer-head">
+    <h2>Ops config</h2>
+    <button class="drawer-close" id="drawerClose" aria-label="Close">✕</button>
+  </div>
+  <div class="drawer-body">
+    <div>
+      <div class="sec-head">Data source (L / M / R)</div>
       <div class="srcs" role="group" aria-label="Data source">
         <button type="button" data-src="live" aria-pressed="false" title="Keyboard: L">LIVE</button>
         <button type="button" data-src="mock" aria-pressed="false" title="Keyboard: M">MOCK</button>
         <button type="button" data-src="replay" aria-pressed="false" title="Keyboard: R">REPLAY</button>
       </div>
     </div>
-    <section class="routes" aria-label="Routes considered">
-      <div class="sec-head"><h3>Why this route</h3><span class="meta" id="routesSrc"></span></div>
+    <button id="cutBtn" type="button" aria-pressed="false" title="Keyboard: C">
+      <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" aria-hidden="true">
+        <path d="M8 34a14 14 0 0 1 14-14"/><path d="M4 20a22 22 0 0 1 22-14"/><circle cx="10" cy="38" r="2.6" fill="currentColor" stroke="none"/>
+        <path d="M30 26l12 12M42 26L30 38"/>
+      </svg>
+      <span><span class="cb-main">CUT NETWORK</span><span class="cb-sub">Sever the uplink to the cloud</span></span>
+    </button>
+    <div>
+      <div class="sec-head">Cloud dispatch (counterfactual)</div>
+      <span class="status-pill" id="cloudBadge" data-mode="none" style="width:100%"><span class="led"></span><span id="cloudText">Awaiting node</span></span>
+    </div>
+    <div>
+      <div class="sec-head">Why this route</div>
       <div id="routesBody"><div class="rt-empty">No route decided yet. Waiting for a node frame.</div></div>
-    </section>
-    <section class="frames" aria-label="Raw telemetry">
-      <div class="sec-head"><h3>Raw frames</h3><span class="rate" id="teleRate">no frames</span></div>
+    </div>
+    <div style="min-height:0">
+      <div class="sec-head" style="display:flex;justify-content:space-between">Raw frames <span class="rate" id="teleRate">no frames</span></div>
       <div id="tail" aria-live="off"></div>
-    </section>
-  </footer>
+    </div>
+  </div>
 </div>
-
-<template id="panelTpl">
-  <div class="side-head">
-    <div class="cv"><canvas class="psun" aria-hidden="true"></canvas></div>
-    <div><h2 class="pname"></h2><p class="psub"></p></div>
-    <div class="chip pstate" data-s="none">AWAITING NODE</div>
-  </div>
-  <div class="capiz">
-    <div class="pane hazard" style="--i:0" data-hz="NONE">
-      <div class="hz-wash"></div>
-      <div class="lbl hz-label">Hazard at node-01</div>
-      <div class="hz-word">AWAITING NODE</div>
-      <div class="hz-why"></div>
-      <div class="meta hz-meta"></div>
-    </div>
-    <div class="pane water" style="--i:1">
-      <div class="lbl">Water ladder</div>
-      <div class="water-body">
-        <div class="w-read">
-          <div class="w-big"><span class="w-wet">–</span><span class="of"> of 6</span></div>
-          <div class="w-sub">rungs wet</div>
-          <div class="w-mm">— mm</div>
-          <div class="meta w-tds">TDS —</div>
-        </div>
-        <div class="cv" style="width:118px"><canvas class="gauge" aria-hidden="true"></canvas></div>
-      </div>
-    </div>
-    <div class="pane map" style="--i:2">
-      <div class="lbl">Route map</div>
-      <div class="cv"><canvas class="mapc" role="img" aria-label="Top down map of node, target, chosen route and robot"></canvas></div>
-    </div>
-    <div class="blackout">
-      <div class="bo-kicker">UPLINK CUT</div>
-      <div class="bo-title">Awaiting dispatch server</div>
-      <div class="bo-sub">no decision since the cut</div>
-    </div>
-  </div>
-</template>
 
 <script id="sim">
 (function (g) {
@@ -932,82 +949,53 @@ const SITE = SIM.SITE;
 const qs = new URLSearchParams(location.search);
 const WS_URL = qs.get('ws') || `ws://${location.hostname || 'localhost'}:8765`;
 const CLOUD_RTT_MS = 380;     // MOCK/REPLAY only: a plausible number for canned data
-// In LIVE the central panel stops pretending. It calls the bridge, which really
+// In LIVE the cloud pane stops pretending. It calls the bridge, which really
 // calls a cloud model, and renders whatever actually came back including the
 // failure. state.triage holds the last real result.
 const API_URL = qs.get('api') || `http://${location.hostname || 'localhost'}:8767`;
-const STALE_MS = 6000;        // no decision for this long = the sun stops
+const STALE_MS = 6000;        // no decision for this long = the unit reads stale
 const STAGES = ['REQUESTED', 'TRIAGED', 'DISPATCHED', 'EN_ROUTE', 'DELIVERED'];
 const MODE_STAGE = { IDLE: 'REQUESTED', TRIAGE: 'TRIAGED', PLANNING: 'DISPATCHED', DRIVING: 'EN_ROUTE', AVOIDING: 'EN_ROUTE', REROUTING: 'EN_ROUTE', DELIVERING: 'EN_ROUTE', ARRIVED: 'DELIVERED', DELIVERED: 'DELIVERED' };
-const C = { pearl: '#F2EADF', gold: '#FCD116', teal: '#1C7982', tealInk: '#86CBD0', crimson: '#CE1126', ground: '#121110' };
-const pearl = a => `rgba(242,234,223,${a})`;
-const FONT = '"IBM Plex Sans", system-ui, sans-serif';
+const C = { violet: '#7C6CF0', red: '#E5484D', amber: '#F5C542', orange: '#FF6A2C', water: '#3B82F6', ink: '#EDEDF3', dim: 'rgba(237,237,243,.4)' };
+const ink = a => `rgba(237,237,243,${a})`;
+const FONT = '"Inter", system-ui, sans-serif';
+const CONDF = '"IBM Plex Sans Condensed", "Inter", system-ui, sans-serif';
 
 const mq = matchMedia('(prefers-reduced-motion: reduce)');
 let reduced = mq.matches;
 mq.addEventListener ? mq.addEventListener('change', e => { reduced = e.matches; }) : mq.addListener(e => { reduced = e.matches; });
 
-const state = { source: null, cut: false, cutAt: 0, triage: null };
+const state = { source: null, cut: false, cutAt: 0, view: 'detail', filter: 'all', search: '', layer: 'zone', triage: null };
 const $ = id => document.getElementById(id);
+const bootAt = Date.now();
 
-/* ---------------- panels ---------------- */
-function buildPanel(key, title, sub) {
-  const el = $('p-' + key);
-  el.append($('panelTpl').content.cloneNode(true));
-  const q = s => el.querySelector(s);
-  q('.pname').textContent = title;
-  q('.psub').textContent = sub;
+/* ---------------- panel state: edge autonomy + the full mirrored cloud dispatch ---------------- */
+function freshPanel() {
   return {
-    key, el,
-    dom: {
-      sun: q('.psun'), pstate: q('.pstate'),
-      hazard: q('.hazard'), hzLabel: q('.hz-label'), word: q('.hz-word'), why: q('.hz-why'), meta: q('.hz-meta'),
-      gauge: q('.gauge'), wWet: q('.w-wet'), wMm: q('.w-mm'), tds: q('.w-tds'),
-      map: q('.mapc'), boSub: q('.bo-sub')
-    },
-    frozen: false, sinceCut: 0
+    node: null, unit: null, disp: null, nodeAt: 0, unitAt: 0, dispAt: 0, lastFrame: 0, lastDecision: 0,
+    trail: [], plan: null, committed: null, routeId: null, routeDrawStart: 0, pose: null,
+    wet: { from: 0, to: 0, t0: 0 }, phase: 0, dirty: true, frozen: false, sinceCut: 0
   };
 }
-function resetPanel(p) {
-  Object.assign(p, {
-    node: null, unit: null, disp: null, nodeAt: 0, unitAt: 0, dispAt: 0, lastFrame: 0, lastDecision: 0, pulseAt: -1e9,
-    rot: p.rot || 0, phase: p.phase || 0, trail: [], plan: null, committed: null,
-    routeId: null, routeDrawStart: 0, pose: null, wet: { from: 0, to: 0, t0: 0 }, dirty: true
-  });
-}
-const P = {
-  central: buildPanel('central', 'Central dispatch', 'Decides in the cloud. Needs the uplink.'),
-  edge: buildPanel('edge', 'Edge autonomy', 'Decides on node-01 and the GX10. No cloud.')
-};
-resetPanel(P.central); resetPanel(P.edge);
+const U = freshPanel();              // edge: node-01 + unit-01 + brain-01, decides on device, never cut
+const CLOUD = freshPanel();          // central dispatch: the same frames, one round trip later, freezes on cut
 
-// Real shell is never uniform: nudge each pane's opacity a little.
-(function varyPanes() {
-  let seed = 20260919;
-  const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
-  document.querySelectorAll('.pane').forEach(el => el.style.setProperty('--a', (0.035 + rnd() * 0.015).toFixed(3)));
-})();
-
-/* ---------------- ingest ---------------- */
 function kind(f) {
   if (f.hazard || f.water) return 'node';
   if (f.stage || f.route !== undefined || f.rejected) return 'dispatch';
   // The recorded mission carries a pose on every unit frame. A real unit on
   // water does not: there is no GPS indoors and no wheel odometry on a hull,
   // so pose is null and the frame is identified by what it always carries.
-  // Keying only on pose is why live boat frames were being dropped as 'other'.
   if (f.pose || typeof f.mode === 'string' || f.obstacle_mm !== undefined) return 'unit';
   return 'other';
 }
+function isDecisionFrame(f) { const k = kind(f); return k === 'node' || k === 'dispatch'; }
 function ingest(f) {
   if (!f || typeof f !== 'object' || Array.isArray(f)) return;
   tailPush(f);
-  applyFrame(P.edge, f);
-  if (!state.cut) setTimeout(() => { if (!state.cut) applyFrame(P.central, f); }, CLOUD_RTT_MS);
-}
-function decision(p, now) {
-  p.lastDecision = now; p.pulseAt = now;
-  if (state.cut && p.key === 'edge') p.sinceCut++;
+  applyFrame(U, f);
+  if (state.cut && isDecisionFrame(f)) U.sinceCut = (U.sinceCut || 0) + 1;
+  if (!state.cut) setTimeout(() => { if (!state.cut) applyFrame(CLOUD, f); }, CLOUD_RTT_MS);
 }
 function curWet(p, now) {
   const w = p.wet; if (reduced) return w.to;
@@ -1028,7 +1016,7 @@ function applyFrame(p, f) {
   if (k === 'node') {
     const wet = f.water && Number.isFinite(f.water.wet) ? f.water.wet : 0;
     if (!p.node || (p.node.water && p.node.water.wet) !== wet) p.wet = { from: curWet(p, now), to: wet, t0: now };
-    p.node = f; p.nodeAt = now; decision(p, now);
+    p.node = f; p.nodeAt = now; p.lastDecision = now;
   } else if (k === 'unit') {
     if (p.unit && p.unit.mission !== f.mission) { p.trail = []; p.pose = null; }
     // Mode, mission and obstacle range are real whether or not there is a fix,
@@ -1048,7 +1036,7 @@ function applyFrame(p, f) {
     }
     p.unit = f; p.unitAt = now;
   } else if (k === 'dispatch') {
-    p.disp = f; p.dispAt = now; decision(p, now);
+    p.disp = f; p.dispAt = now; p.lastDecision = now;
   } else return;
   p.dirty = true;
 }
@@ -1069,7 +1057,16 @@ function computePlan(p) {
     mission: p.unit && p.unit.mission, from: `derived here from ${p.node ? p.node.src : 'node'}` };
 }
 
-/* ---------------- DOM render ---------------- */
+/* ---------------- severity: drives status colors everywhere ---------------- */
+function severity(p) {
+  const st = p.node && p.node.hazard && p.node.hazard.state;
+  if (st === 'IMPASSABLE') return 'critical';
+  if (st === 'CONTAMINATED' || st === 'UNKNOWN') return 'warning';
+  return 'nominal';
+}
+function isAlive(p, now) { return p.lastDecision > 0 && now - p.lastDecision < STALE_MS; }
+
+/* ---------------- misc formatting ---------------- */
 function sourceHint() {
   if (state.source === 'live') return `Listening on ${WS_URL}.`;
   if (state.source === 'replay') return 'Replay starting.';
@@ -1088,110 +1085,197 @@ function fmtT(t) {
 }
 function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
-function renderPanel(p, now) {
-  const d = p.dom, n = p.node, hz = n && n.hazard;
-  const hs = hz && hz.state ? String(hz.state) : null;
-  d.hazard.dataset.hz = hs || 'NONE';
-  d.word.textContent = hs ? hs.replace(/_/g, ' ') : 'AWAITING NODE';
-  d.why.textContent = hz && hz.why ? hz.why : `No frame from the node yet. ${sourceHint()}`;
-  d.hzLabel.textContent = `Hazard at ${(n && n.src) || 'node-01'}`;
-  const w = n && n.water;
-  d.wWet.textContent = w ? w.wet : '–';
-  d.wMm.textContent = w ? `${w.mm} mm` : '— mm';
-  d.tds.textContent = n && n.tds ? `TDS ${n.tds.ppm} ppm, ${n.tds.trend || ''}` : 'TDS —';
-
-  p.plan = computePlan(p);
-  const rid = p.plan && p.plan.route ? p.plan.route.id : null;
-  if (rid !== p.routeId) { p.routeId = rid; p.routeDrawStart = now; }
+/* ---------------- left panel: unit card / detail ---------------- */
+function matchesFilter() {
+  if (state.filter !== 'all' && severity(U) !== state.filter) return false;
+  if (state.search) {
+    const q = state.search.toLowerCase();
+    const hay = `tanod-01 ${(U.node && U.node.src) || ''} ${(U.unit && U.unit.mission) || ''}`.toLowerCase();
+    if (!hay.includes(q)) return false;
+  }
+  return true;
 }
-
-function renderStepper() {
-  const pl = P.edge.plan, idx = pl && pl.stage ? STAGES.indexOf(pl.stage) : -1;
-  document.querySelectorAll('#steps li').forEach((li, i) => {
-    li.classList.toggle('done', idx >= 0 && i < idx);
-    li.classList.toggle('now', i === idx);
+function waypointTrack(idx) {
+  let html = '<div class="wtrack">';
+  STAGES.forEach((s, i) => {
+    if (i) html += `<div class="seg-line${idx >= 0 && i <= idx ? ' done' : ''}"></div>`;
+    const cls = idx >= 0 && i < idx ? 'done' : idx === i ? 'now' : '';
+    html += `<div class="seg-dot ${cls}" title="${s}"></div>`;
   });
-  $('missionId').textContent = (pl && pl.mission) || (P.edge.unit && P.edge.unit.mission) || '—';
+  return html + '</div>';
 }
+function cardMetaLines() {
+  const n = U.node, hz = n && n.hazard, w = n && n.water;
+  const lines = [];
+  lines.push(`<div><span class="k">Hazard</span> ${hz ? esc(hz.state.replace(/_/g, ' ')) : 'awaiting node'}</div>`);
+  lines.push(`<div><span class="k">Water</span> ${w ? `${w.wet} of ${w.rungs} rungs · ${w.mm} mm` : '—'}</div>`);
+  lines.push(`<div><span class="k">Decided on</span> ${n ? esc(n.decided_on) : '—'} · <span class="k">inference</span> ${n && n.link ? esc(n.link.inference) : '—'}</div>`);
+  lines.push(`<div><span class="k">Uplink</span> ${state.cut ? 'CUT' : n && n.link ? (n.link.uplink ? 'up' : 'down') : '—'}</div>`);
+  return lines.join('');
+}
+function actionLog(label) {
+  tailNote(`operator: ${label} requested — no command uplink to the unit exists; the edge keeps deciding on its own plan`);
+}
+function renderLeft() {
+  const body = $('lpBody');
+  $('unitCount').textContent = matchesFilter() ? '1 unit' : '0 units';
+  if (!matchesFilter()) { body.innerHTML = '<div class="rt-empty" style="padding:10px">No unit matches the current search or filter.</div>'; return; }
 
-function isAlive(p, now) { return !p.frozen && p.lastDecision > 0 && now - p.lastDecision < STALE_MS; }
+  const sev = severity(U), pl = U.plan, idx = pl && pl.stage ? STAGES.indexOf(pl.stage) : -1;
+  const n = U.node, alive = isAlive(U, performance.now());
+  const missionId = (pl && pl.mission) || (U.unit && U.unit.mission) || '—';
+  const showActions = sev !== 'nominal';
 
-function renderTimed(now) {
-  for (const p of [P.central, P.edge]) {
-    const d = p.dom, alive = isAlive(p, now);
-    let s, txt;
-    if (p.frozen) { s = 'frozen'; txt = 'Frozen · no uplink'; }
-    else if (!p.lastDecision) { s = 'none'; txt = 'Awaiting node'; }
-    else if (!alive) { s = 'stale'; txt = `Silent ${ago(now - p.lastDecision)}`; }
-    else if (p.key === 'edge' && state.cut) { s = 'live'; txt = `Deciding · ${p.sinceCut} since cut`; }
-    else if (p.key === 'central' && state.source === 'live') {
-      const tg = state.triage;
-      if (!tg) { s = 'none'; txt = 'Calling cloud…'; }
-      else if (tg.decided_on === 'cloud') { s = 'live'; txt = `Cloud answered · ${tg.latency_ms} ms`; }
-      else { s = 'stale'; txt = tg.error || 'cloud did not answer'; }
-    }
-    else { s = 'live'; txt = p.key === 'central' ? `Receiving · ${CLOUD_RTT_MS} ms RTT` : 'Deciding on device'; }
-    if (d.pstate.textContent !== txt) d.pstate.textContent = txt;
-    d.pstate.dataset.s = s;
-    const n = p.node;
-    if (p.key === 'central' && state.source === 'live') {
-      const tg = state.triage;
-      d.meta.textContent = tg
-        ? `${tg.text} · decided on ${tg.decided_on}${tg.blocked_at ? ' · uplink cut at the ' + tg.blocked_at : ''}`
-        : 'awaiting first cloud call';
-    } else {
-      d.meta.textContent = n && n.hazard
-        ? `conf ${(+n.hazard.conf || 0).toFixed(2)} · decided on ${n.decided_on || '—'} · ${ago(now - p.nodeAt)} ago` : '';
-    }
-    if (p.key === 'central' && state.cut) {
-      d.boSub.textContent = `cut ${fmtClock((now - state.cutAt) / 1000)} ago · last decision ${p.lastDecision ? ago(now - p.lastDecision) + ' ago' : 'never'}`;
-    }
+  const hzState = n && n.hazard && n.hazard.state;
+  const headText = sev === 'critical' ? 'Impassable crossing'
+    : hzState === 'UNKNOWN' ? 'Sensor fault · unsurveyed'
+    : sev === 'warning' ? 'Contaminated crossing'
+    : alive ? 'Nominal · deciding' : 'Awaiting node';
+  const cardHead = `<div class="ucard-head s-${sev}"><span class="dot"></span>${headText}<span class="grow"></span></div>`;
+  const cardTop = `<div class="ucard-top"><div class="ucard-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 15l1.5-5A2 2 0 0 1 6.4 8.5h11.2A2 2 0 0 1 19.5 10l1.5 5"/><rect x="2.5" y="15" width="19" height="4.5" rx="1.5"/><circle cx="7" cy="19.5" r="1.4"/><circle cx="17" cy="19.5" r="1.4"/></svg></div>
+    <div><div class="ucard-name">TANOD-01</div><div class="ucard-mission">mission ${esc(missionId)}</div></div></div>`;
+  const actions = showActions ? `<div class="ucard-actions">
+      <button type="button" data-act="recall">Recall</button>
+      <button type="button" data-act="hold">Hold</button>
+      <button type="button" data-act="reroute">Reroute</button>
+    </div>` : '';
+
+  if (state.view === 'all') {
+    body.innerHTML = `<div class="ucard">${cardHead}<div class="ucard-body">${cardTop}${waypointTrack(idx)}<div class="ucard-meta">${cardMetaLines()}</div>${actions}</div></div>`;
+  } else {
+    const w = n && n.water, wet = curWet(U, performance.now());
+    const rid = pl && pl.route ? pl.route.id : null;
+    const routesHtml = routeListHtml(pl);
+    body.innerHTML = `<div class="ucard">${cardHead}<div class="ucard-body">${cardTop}${waypointTrack(idx)}<div class="ucard-meta">${cardMetaLines()}</div>
+        <div class="ucard-why">${n && n.hazard && n.hazard.why ? esc(n.hazard.why) : `No frame from the node yet. ${sourceHint()}`}</div>${actions}</div></div>
+      <div class="udetail">
+        <div class="ud-block">
+          <h3>Water ladder</h3>
+          <div class="ud-water">
+            <div>
+              <div class="ud-big">${w ? w.wet : '–'}<span class="of"> of ${w ? w.rungs : 6}</span></div>
+              <div class="ud-sub">rungs wet</div>
+              <div class="ud-mm">${w ? `${w.mm} mm` : '— mm'}</div>
+              <div class="ud-tds">${n && n.tds ? `TDS ${n.tds.ppm} ppm, ${n.tds.trend || ''}` : 'TDS —'}</div>
+            </div>
+            <div class="gaugewrap"><canvas id="udGauge"></canvas></div>
+          </div>
+        </div>
+        <div class="ud-block">
+          <h3>Payload</h3>
+          <div class="ucard-meta">
+            <div><span class="k">Cargo</span> 12 L potable water, sealed against contamination</div>
+            <div><span class="k">Battery</span> ${U.unit ? `${U.unit.battery_pct}%` : '—'}</div>
+            <div><span class="k">Obstacle</span> ${U.unit ? `${U.unit.obstacle_mm} mm ahead` : '—'}</div>
+          </div>
+        </div>
+        <div class="ud-block">
+          <h3>Why this route <span style="float:right;font-weight:400;text-transform:none;letter-spacing:0">${pl ? esc(pl.from) : ''}</span></h3>
+          ${routesHtml}
+        </div>
+      </div>`;
+    drawGauge($('udGauge'), U, performance.now());
   }
-  renderHeader(now);
+  body.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', () => actionLog(b.dataset.act.toUpperCase())));
 }
-
-function renderHeader(now) {
-  const e = P.edge, n = e.node, alive = isAlive(e, now);
-  let mode = 'none', txt = 'AWAITING NODE';
-  if (n) { if (n.decided_on === 'cloud') { mode = 'cloud'; txt = 'RUNNING CLOUD'; } else { mode = 'local'; txt = 'RUNNING LOCAL · GX10'; } }
-  $('runBadge').dataset.mode = mode;
-  if ($('runText').textContent !== txt) $('runText').textContent = txt;
-  const link = n && n.link;
-  $('runSub').textContent = `decided_on ${n ? n.decided_on : '—'} · inference ${link ? link.inference : '—'} · uplink ${state.cut ? 'CUT' : link ? (link.uplink ? 'up' : 'down') : '—'}`;
-
-  const sl = $('sunLabel');
-  const sTxt = !e.lastDecision ? ['Awaiting node', 'no decision yet']
-    : alive ? ['Deciding', `last decision ${ago(now - e.lastDecision)} ago`]
-    : ['No decisions', `source silent ${ago(now - e.lastDecision)}`];
-  sl.firstChild.nodeValue = sTxt[0];
-  sl.querySelector('small').textContent = sTxt[1];
-
-  document.body.classList.toggle('crisis', !!(n && n.hazard && n.hazard.state === 'IMPASSABLE'));
-
-  let html;
-  if (state.source === 'replay') html = `<span class="badge replay" title="Recorded mission m-7, not live data">REPLAY ${fmtClock(replay.pos)} / ${fmtClock(replay.dur)}</span>`;
-  else if (state.source === 'mock') html = `<span class="badge src" title="In-page generator, no hardware attached">MOCK DATA</span>`;
-  else html = `<span class="badge src" title="${esc(WS_URL)}">LIVE · ${ws.status === 'connected' ? 'connected' : ws.status === 'connecting' ? 'connecting' : `retry ${Math.max(0, Math.ceil((ws.retryAt - now) / 1000))} s`}</span>`;
-  const sb = $('srcBadge');
-  if (sb.innerHTML !== html) sb.innerHTML = html;
-}
-
-function renderRoutes() {
-  const pl = P.edge.plan, body = $('routesBody');
-  $('routesSrc').textContent = pl ? pl.from : '';
-  if (!pl || !pl.route) {
-    body.innerHTML = `<div class="rt-empty">${P.edge.node || P.edge.disp ? esc(pl && pl.why ? pl.why : 'Triaging. No route yet.') : 'No route decided yet. Waiting for a node frame.'}</div>`;
-    return;
-  }
+function routeListHtml(pl) {
+  if (!pl || !pl.route) return `<div class="rt-empty">${U.node || U.disp ? esc(pl && pl.why ? pl.why : 'Triaging. No route yet.') : 'No route decided yet. Waiting for a node frame.'}</div>`;
   const r = pl.route, blocked = x => /exceeds|impassable/i.test(x.reason || '');
   const len = Number.isFinite(r.len_m) ? `<small>${r.len_m} m</small>` : '';
-  body.innerHTML = `<ul class="rt">` +
+  return `<ul class="rt">` +
     `<li class="take"><span class="ic" aria-hidden="true">✓</span><span class="nm">Taking ${esc(r.name || r.id)}${len}</span><span class="rs">${esc(pl.why)}</span></li>` +
     pl.rejected.map(x => `<li class="${blocked(x) ? 'blocked' : 'no'}"><span class="ic" aria-hidden="true">✕</span><span class="nm">${blocked(x) ? 'Impassable' : 'Not taken'}: ${esc(x.name || x.id)}</span><span class="rs">${esc(x.reason || '')}</span></li>`).join('') +
     `</ul>`;
 }
+function renderRoutesDrawer() { $('routesBody').innerHTML = routeListHtml(U.plan); }
 
-/* ---------------- canvas ---------------- */
+/* ---------------- top bar + drawer status ---------------- */
+function renderTop(now) {
+  const n = U.node, alive = isAlive(U, now);
+  let mode = 'none', txt = 'AWAITING NODE';
+  if (!U.lastDecision) { mode = 'none'; txt = 'AWAITING NODE'; }
+  else if (!alive) { mode = 'none'; txt = `SILENT ${ago(now - U.lastDecision)}`; }
+  else if (n && n.decided_on === 'cloud') { mode = 'cloud'; txt = 'RUNNING CLOUD'; }
+  else { mode = 'local'; txt = 'RUNNING LOCAL · GX10'; }
+  $('runBadge').dataset.mode = mode;
+  if ($('runText').textContent !== txt) $('runText').textContent = txt;
+
+  let html;
+  if (state.source === 'replay') html = `REPLAY ${fmtClock(replay.pos)} / ${fmtClock(replay.dur)}`;
+  else if (state.source === 'mock') html = `MOCK DATA`;
+  else html = `LIVE · ${ws.status === 'connected' ? 'connected' : ws.status === 'connecting' ? 'connecting' : `retry ${Math.max(0, Math.ceil((ws.retryAt - now) / 1000))} s`}`;
+  const sb = $('srcBadge');
+  if (sb.textContent !== html) sb.textContent = html;
+
+  const d = new Date();
+  $('topClock').textContent = `${String(d.getUTCHours()).padStart(2,'0')}:${String(d.getUTCMinutes()).padStart(2,'0')}:${String(d.getUTCSeconds()).padStart(2,'0')} UTC · decided_on ${n ? n.decided_on : '—'}`;
+
+  const cb = $('cloudBadge'), ct = $('cloudText');
+  const cs = paneStatus(CLOUD, now, false);
+  cb.dataset.mode = cs.s === 'live' ? 'cloud' : 'none';
+  ct.textContent = cs.txt;
+
+  const cutOn = document.querySelector('.mappane[data-panel=cloud]');
+  cutOn.classList.toggle('frozen', state.cut);
+  $('cloudBlackout').classList.toggle('show', state.cut);
+  if (state.cut) $('cloudBlackoutSub').textContent = `cut ${fmtClock((now - state.cutAt) / 1000)} ago · edge kept deciding, ${U.sinceCut || 0} decisions since`;
+
+  renderHud('edge', U, now, true);
+  renderHud('cloud', CLOUD, now, false);
+  renderDiag(now);
+}
+
+/* status text shared by the topbar, the HUD chips and the drawer cloud badge */
+function paneStatus(p, now, isEdge) {
+  const alive = isAlive(p, now);
+  if (p.frozen) return { s: 'frozen', txt: `Frozen · no uplink · last decision ${p.lastDecision ? ago(now - p.lastDecision) + ' ago' : 'never'}` };
+  if (!p.lastDecision) return { s: 'none', txt: 'Awaiting node' };
+  if (!alive) return { s: 'stale', txt: `Silent ${ago(now - p.lastDecision)}` };
+  if (isEdge && state.cut) return { s: 'live', txt: `Deciding · ${p.sinceCut || 0} since cut` };
+  // The cloud pane's whole job is to fail honestly when the uplink dies, so in
+  // LIVE its status text comes from the real triage poll, not this delayed
+  // mirror of telemetry. MOCK/REPLAY have no bridge to call, so they keep the
+  // canned RTT text.
+  if (!isEdge && state.source === 'live') {
+    const tg = state.triage;
+    if (!tg) return { s: 'none', txt: 'Calling cloud…' };
+    if (tg.decided_on === 'cloud') return { s: 'live', txt: `Cloud answered · ${tg.latency_ms} ms` };
+    return { s: 'stale', txt: tg.error || 'cloud did not answer' };
+  }
+  return { s: 'live', txt: isEdge ? 'Deciding on device' : `Receiving · ${CLOUD_RTT_MS} ms RTT` };
+}
+function renderHud(prefix, p, now, isEdge) {
+  const n = p.node, hz = n && n.hazard, hs = hz && hz.state ? String(hz.state) : null;
+  const st = paneStatus(p, now, isEdge);
+  const chip = $(prefix + 'Chip'); chip.dataset.s = st.s; chip.textContent = st.txt;
+  const word = $(prefix + 'Word'); word.dataset.hz = hs || 'NONE'; word.textContent = hs ? hs.replace(/_/g, ' ') : 'AWAITING NODE';
+  $(prefix + 'Why').textContent = hz && hz.why ? hz.why : `No frame from the node yet. ${sourceHint()}`;
+  if (!isEdge && state.source === 'live') {
+    const tg = state.triage;
+    $(prefix + 'Meta').textContent = tg
+      ? `${tg.text} · decided on ${tg.decided_on}${tg.blocked_at ? ' · uplink cut at the ' + tg.blocked_at : ''}`
+      : 'awaiting first cloud call';
+  } else {
+    $(prefix + 'Meta').textContent = n && n.hazard
+      ? `conf ${(+n.hazard.conf || 0).toFixed(2)} · decided on ${n.decided_on || '—'} · inference ${n.link ? n.link.inference : '—'} · ${ago(now - p.nodeAt)} ago`
+      : '';
+  }
+  drawGauge($(prefix + 'Gauge'), p, now);
+}
+function renderDiag(now) {
+  $('diagBuild').textContent = 'tanod-' + (location.hash.slice(1) || '5a85c24');
+  const rail = $('diagRail');
+  rail.classList.toggle('cut', state.cut);
+  $('diagLink').textContent = state.cut ? 'UPLINK SEVERED' : 'UPLINK OK';
+  const inf = U.node && U.node.link ? U.node.link.inference : null;
+  $('diagInf').textContent = inf ? `${inf.toUpperCase()} · GX10` : '—';
+  const up = Math.floor((Date.now() - bootAt) / 1000);
+  $('diagUp').textContent = `${String(Math.floor(up / 3600)).padStart(2, '0')}:${String(Math.floor(up / 60) % 60).padStart(2, '0')}:${String(up % 60).padStart(2, '0')}`;
+  const d = new Date();
+  $('diagClk').textContent = `${String(d.getUTCHours()).padStart(2,'0')}:${String(d.getUTCMinutes()).padStart(2,'0')}:${String(d.getUTCSeconds()).padStart(2,'0')}`;
+}
+
+/* ---------------- canvas: water gauge (in unit detail) ---------------- */
 function prep(c) {
   const r = c.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
   const w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr));
@@ -1201,87 +1285,61 @@ function prep(c) {
   ctx.clearRect(0, 0, r.width, r.height);
   return [ctx, r.width, r.height];
 }
-
-// Eight-ray sun. alive=false draws it still and ash-grey.
-function drawSun(canvas, rot, pulse, alive) {
+function drawGauge(canvas, p, now) {
+  if (!canvas) return;
   const [ctx, w, h] = prep(canvas);
-  if (w < 4 || h < 4) return;
-  const R = Math.min(w, h) / 2 * 0.86, r = R * 0.38, s = 1 + 0.12 * pulse;
-  ctx.save();
-  ctx.translate(w / 2, h / 2); ctx.scale(s, s); ctx.rotate(rot);
-  if (alive) { ctx.shadowColor = 'rgba(252,209,22,.7)'; ctx.shadowBlur = 3 + 16 * pulse; }
-  ctx.fillStyle = alive ? C.gold : '#5E5A4E';
-  for (let i = 0; i < 8; i++) {
-    ctx.save(); ctx.rotate(i * Math.PI / 4);
-    ctx.beginPath(); ctx.moveTo(-r * 0.3, -r * 1.22); ctx.lineTo(0, -R); ctx.lineTo(r * 0.3, -r * 1.22); ctx.closePath(); ctx.fill();
-    ctx.restore();
-  }
-  ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
-  ctx.restore();
-}
-
-// Six discrete rungs. Never a smooth level: fill moves one whole cell at a time.
-function drawGauge(p, now) {
-  const [ctx, w, h] = prep(p.dom.gauge);
   if (w < 20 || h < 40) return;
   const n = (p.node && p.node.water && p.node.water.rungs) || 6;
   const wet = curWet(p, now);
-  const tubeW = 46, x0 = 22, gap = 5, pad = 2;
+  const tubeW = w - 4, x0 = 2, gap = 3, pad = 2;
   const cellH = (h - pad * 2 - gap * (n - 1)) / n;
-  ctx.textBaseline = 'middle';
   for (let i = 0; i < n; i++) {
     const y = h - pad - (i + 1) * cellH - i * gap;
     const f = Math.max(0, Math.min(1, wet - i));
-    ctx.fillStyle = pearl(.05); ctx.fillRect(x0, y, tubeW, cellH);
-    if (f > 0) {
-      const fh = cellH * f, top = y + cellH - fh;
-      ctx.fillStyle = C.teal;
-      if (i === Math.ceil(wet) - 1 && !reduced) {
-        const amp = Math.min(2, fh / 3), wy = x => top + 2 + Math.sin(x / 8 + p.phase) * amp;
-        ctx.beginPath(); ctx.moveTo(x0, y + cellH);
-        for (let x = 0; x <= tubeW; x += 2) ctx.lineTo(x0 + x, wy(x));
-        ctx.lineTo(x0 + tubeW, y + cellH); ctx.closePath(); ctx.fill();
-        ctx.strokeStyle = 'rgba(170,225,229,.6)'; ctx.lineWidth = 1.5; ctx.beginPath();
-        for (let x = 0; x <= tubeW; x += 2) x ? ctx.lineTo(x0 + x, wy(x)) : ctx.moveTo(x0, wy(0));
-        ctx.stroke();
-      } else ctx.fillRect(x0, top, tubeW, fh);
-    }
-    ctx.strokeStyle = f >= 1 ? 'rgba(134,203,208,.85)' : pearl(.3); ctx.lineWidth = 1.5;
-    ctx.strokeRect(x0 + .75, y + .75, tubeW - 1.5, cellH - 1.5);
-    ctx.font = `500 16px "IBM Plex Mono", monospace`; ctx.textAlign = 'right';
-    ctx.fillStyle = f >= 1 ? C.pearl : pearl(.45); ctx.fillText(String(i + 1), x0 - 7, y + cellH / 2);
+    ctx.fillStyle = ink(.06); ctx.fillRect(x0, y, tubeW, cellH);
+    if (f > 0) { const fh = cellH * f; ctx.fillStyle = C.water; ctx.fillRect(x0, y + cellH - fh, tubeW, fh); }
+    ctx.strokeStyle = f >= 1 ? C.water : ink(.2); ctx.lineWidth = 1; ctx.strokeRect(x0 + .5, y + .5, tubeW - 1, cellH - 1);
   }
-  // passable depth limit, between rung 4 and 5
   const k = Math.round(SIM.PASSABLE_MM / 10);
   const ly = h - pad - k * cellH - (k - 0.5) * gap;
-  ctx.setLineDash([4, 4]); ctx.strokeStyle = pearl(.75); ctx.lineWidth = 1.5;
-  ctx.beginPath(); ctx.moveTo(x0 - 2, ly); ctx.lineTo(x0 + tubeW + 6, ly); ctx.stroke(); ctx.setLineDash([]);
-  ctx.textAlign = 'left'; ctx.fillStyle = pearl(.75); ctx.font = `500 16px ${FONT}`;
-  ctx.fillText('limit', x0 + tubeW + 9, ly);
+  ctx.setLineDash([3, 3]); ctx.strokeStyle = ink(.6); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x0 - 2, ly); ctx.lineTo(x0 + tubeW + 2, ly); ctx.stroke(); ctx.setLineDash([]);
 }
 
-function drawMap(p, now) {
-  const [ctx, w, h] = prep(p.dom.map);
+/* ---------------- canvas: the tactical map ---------------- */
+function drawMap(p, canvas, now) {
+  const [ctx, w, h] = prep(canvas);
   if (w < 60 || h < 40) return;
-  const B = SITE.bounds, padX = 20, padTop = 34, padBot = 16;
+  const B = SITE.bounds, padX = 40, padTop = 30, padBot = 60;
   const sc = Math.min((w - 2 * padX) / (B.x1 - B.x0), (h - padTop - padBot) / (B.y1 - B.y0));
   const ox = (w - sc * (B.x1 - B.x0)) / 2 - B.x0 * sc;
   const oy = padTop + ((h - padTop - padBot) - sc * (B.y1 - B.y0)) / 2 + B.y1 * sc;
   const X = x => ox + x * sc, Y = y => oy - y * sc;
   const wet = p.node && p.node.water ? curWet(p, now) : 0, ph = p.phase;
+  const floodLayer = state.layer === 'flood';
 
-  // water: the channel widens with the rung count
+  // tile base: heavily desaturated dark grid
+  ctx.fillStyle = '#0A0A0F'; ctx.fillRect(0, 0, w, h);
+  ctx.strokeStyle = 'rgba(255,255,255,.035)'; ctx.lineWidth = 1;
+  const grid = 32;
+  ctx.beginPath();
+  for (let x = (ox % grid); x < w; x += grid) { ctx.moveTo(x, 0); ctx.lineTo(x, h); }
+  for (let y = (oy % grid); y < h; y += grid) { ctx.moveTo(0, y); ctx.lineTo(w, y); }
+  ctx.stroke();
+
+  // flood zones: translucent blue, boosted under the FLOOD DEPTH layer
+  const boost = floodLayer ? 1.8 : 1;
   const grow = wet * 1.5, ch = SITE.channel;
-  ctx.fillStyle = `rgba(28,121,130,${0.2 + wet * 0.055})`;
+  ctx.fillStyle = `rgba(59,130,246,${Math.min(.85, (0.16 + wet * 0.05) * boost)})`;
   ctx.beginPath();
   for (let y = B.y1 + 6; y >= B.y0 - 6; y -= 2) ctx.lineTo(X(ch.x0 - grow + Math.sin(y / 6 + ph) * 0.7), Y(y));
   for (let y = B.y0 - 6; y <= B.y1 + 6; y += 2) ctx.lineTo(X(ch.x1 + grow + Math.sin(y / 7 - ph) * 0.7), Y(y));
   ctx.closePath(); ctx.fill();
   const lw = SITE.lowland;
-  ctx.fillStyle = `rgba(28,121,130,${0.12 + wet * 0.045})`;
+  ctx.fillStyle = `rgba(59,130,246,${Math.min(.7, (0.1 + wet * 0.04) * boost)})`;
   ctx.beginPath(); ctx.ellipse(X(lw.cx), Y(lw.cy), (lw.rx + wet * 3) * sc, (lw.ry + wet * 0.7) * sc, 0, 0, Math.PI * 2); ctx.fill();
   const br = SITE.bridge;
-  ctx.fillStyle = pearl(.22); ctx.fillRect(X(br.x0), Y(br.y + 3), (br.x1 - br.x0) * sc, 6 * sc);
+  ctx.fillStyle = ink(.16); ctx.fillRect(X(br.x0), Y(br.y + 3), (br.x1 - br.x0) * sc, 6 * sc);
 
   const plan = p.plan, chosen = plan && plan.route ? plan.route.id : null;
   const rejected = {}; if (plan) for (const r of plan.rejected) rejected[r.id] = r;
@@ -1290,67 +1348,87 @@ function drawMap(p, now) {
 
   for (const id in SITE.routes) {
     if (id === chosen) continue;
-    ctx.setLineDash([2, 7]); ctx.strokeStyle = pearl(.35); ctx.lineWidth = 3; path(SITE.routes[id].pts); ctx.stroke(); ctx.setLineDash([]);
+    ctx.setLineDash([2, 7]); ctx.strokeStyle = ink(.22); ctx.lineWidth = 2.5; path(SITE.routes[id].pts); ctx.stroke(); ctx.setLineDash([]);
   }
+  const sev = severity(p);
+  const routeColor = sev === 'critical' ? C.red : sev === 'warning' ? C.amber : C.violet;
   let chosenPts = null;
-  if (chosen) chosenPts = plan.route.path && plan.route.path.length > 1
-    ? plan.route.path.map(q => { const xy = SIM.toXY(q[0], q[1]); return [xy.x, xy.y]; })
-    : SITE.routes[chosen] && SITE.routes[chosen].pts;
+  if (chosen) chosenPts = SITE.routes[chosen] && SITE.routes[chosen].pts;
   if (chosenPts) {
     let L = 0; for (let i = 1; i < chosenPts.length; i++) L += Math.hypot(chosenPts[i][0] - chosenPts[i-1][0], chosenPts[i][1] - chosenPts[i-1][1]) * sc;
     const k = reduced ? 1 : Math.min(1, (now - p.routeDrawStart) / 1200), e = 1 - Math.pow(1 - k, 3);
     ctx.setLineDash([L, L]); ctx.lineDashOffset = L * (1 - e);
-    ctx.strokeStyle = 'rgba(18,17,16,.9)'; ctx.lineWidth = 10; path(chosenPts); ctx.stroke();
-    ctx.strokeStyle = C.pearl; ctx.lineWidth = 5; path(chosenPts); ctx.stroke();
+    ctx.strokeStyle = 'rgba(10,10,15,.9)'; ctx.lineWidth = 7; path(chosenPts); ctx.stroke();
+    ctx.strokeStyle = routeColor; ctx.lineWidth = 3.5; path(chosenPts); ctx.stroke();
     ctx.setLineDash([]); ctx.lineDashOffset = 0;
   }
-  ctx.font = `500 16px ${FONT}`; ctx.textBaseline = 'middle'; ctx.textAlign = 'center';
+  ctx.font = `500 12px ${FONT}`; ctx.textBaseline = 'middle'; ctx.textAlign = 'center';
   for (const id in SITE.routes) {
     const r = SITE.routes[id], isC = id === chosen, rej = rejected[id];
-    ctx.fillStyle = isC ? C.pearl : pearl(.5);
-    ctx.font = `${isC ? 600 : 400} 16px ${FONT}`;
+    ctx.fillStyle = isC ? C.ink : ink(.45);
+    ctx.font = `${isC ? 600 : 400} 12px ${FONT}`;
     ctx.fillText(r.name, X(r.label[0]), Y(r.label[1]));
     if (rej && /exceeds|impassable/i.test(rej.reason || '')) {
-      const mx = X(r.mark[0]) - 24, my = Y(r.mark[1]), s = 7;
-      ctx.strokeStyle = C.crimson; ctx.lineWidth = 4;
+      const mx = X(r.mark[0]) - 20, my = Y(r.mark[1]), s = 6;
+      ctx.strokeStyle = C.red; ctx.lineWidth = 3;
       ctx.beginPath(); ctx.moveTo(mx - s, my - s); ctx.lineTo(mx + s, my + s); ctx.moveTo(mx + s, my - s); ctx.lineTo(mx - s, my + s); ctx.stroke();
     }
   }
-  ctx.font = `500 16px ${FONT}`;
-  ctx.fillStyle = pearl(.7); ctx.fillRect(X(0) - 6, Y(0) - 6, 12, 12);
-  ctx.textAlign = 'left'; ctx.fillText('depot', X(0) - 6, Y(0) + 20);
-  const tx = X(SITE.target[0]), ty = Y(SITE.target[1]);
-  ctx.save(); ctx.translate(tx, ty); ctx.rotate(Math.PI / 4); ctx.strokeStyle = C.pearl; ctx.lineWidth = 3; ctx.strokeRect(-7, -7, 14, 14); ctx.restore();
-  ctx.textAlign = 'right'; ctx.fillStyle = C.pearl; ctx.fillText('evac point', tx + 8, ty + 22);
 
+  // staging base: violet rounded square, fire-station glyph
+  const bx = X(0), by = Y(0), bs = 15;
+  ctx.fillStyle = C.violet; roundRect(ctx, bx - bs, by - bs, bs * 2, bs * 2, 5); ctx.fill();
+  ctx.strokeStyle = '#100C24'; ctx.lineWidth = 2; ctx.stroke(); ctx.strokeStyle = C.violet;
+  ctx.fillStyle = '#100C24';
+  ctx.beginPath(); ctx.moveTo(bx - bs * .55, by - bs * .1); ctx.lineTo(bx, by - bs * .7); ctx.lineTo(bx + bs * .55, by - bs * .1); ctx.closePath(); ctx.fill();
+  ctx.fillRect(bx - bs * .4, by - bs * .1, bs * .8, bs * .65);
+  ctx.font = `500 12px ${FONT}`; ctx.textAlign = 'left'; ctx.fillStyle = C.ink; ctx.fillText('staging base', bx + bs + 6, by);
+
+  // delivery pin: violet teardrop at the evac point
+  const tx = X(SITE.target[0]), ty = Y(SITE.target[1]);
+  ctx.save(); ctx.translate(tx, ty - 14);
+  ctx.beginPath(); ctx.moveTo(0, 14); ctx.bezierCurveTo(-9, 2, -9, -10, 0, -10); ctx.bezierCurveTo(9, -10, 9, 2, 0, 14); ctx.closePath();
+  ctx.fillStyle = C.violet; ctx.fill(); ctx.fillStyle = '#100C24'; ctx.beginPath(); ctx.arc(0, -6, 3.5, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+  ctx.textAlign = 'right'; ctx.fillStyle = C.ink; ctx.fillText('evac point', tx - 12, ty - 24);
+
+  // sensor node
   if (p.trail.length > 1) {
-    ctx.setLineDash([1, 5]); ctx.strokeStyle = pearl(.45); ctx.lineWidth = 3;
+    ctx.setLineDash([1, 5]); ctx.strokeStyle = ink(.3); ctx.lineWidth = 2;
     ctx.beginPath(); p.trail.forEach((q, i) => i ? ctx.lineTo(X(q.x), Y(q.y)) : ctx.moveTo(X(q.x), Y(q.y))); ctx.stroke(); ctx.setLineDash([]);
   }
   const nx = X(SITE.node.xy[0]), ny = Y(SITE.node.xy[1]);
   const hs = p.node && p.node.hazard ? p.node.hazard.state : null;
-  ctx.fillStyle = hs === 'IMPASSABLE' ? C.crimson : hs === 'CONTAMINATED' ? C.gold : hs ? C.teal : pearl(.3);
-  ctx.beginPath(); ctx.arc(nx, ny, 9, 0, Math.PI * 2); ctx.fill();
-  ctx.strokeStyle = C.pearl; ctx.lineWidth = 2.5; ctx.stroke();
-  ctx.textAlign = 'left'; ctx.fillStyle = C.pearl; ctx.fillText((p.node && p.node.src) || 'node-01', nx + 16, ny + 12);
+  ctx.fillStyle = hs === 'IMPASSABLE' ? C.red : (hs === 'CONTAMINATED' || hs === 'UNKNOWN') ? C.amber : hs ? C.violet : ink(.3);
+  ctx.beginPath(); ctx.arc(nx, ny, 6, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = C.ink; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.textAlign = 'left'; ctx.fillStyle = C.ink; ctx.fillText((p.node && p.node.src) || 'node-01', nx + 11, ny + 9);
 
+  // the unit: orange dot + heading triangle -- hero color against violet chrome
   const pose = curPose(p, now);
   if (pose) {
     const rx = X(pose.x), ry = Y(pose.y);
     ctx.save(); ctx.translate(rx, ry); ctx.rotate(pose.hdg * Math.PI / 180);
-    ctx.beginPath(); ctx.moveTo(0, -14); ctx.lineTo(10, 10); ctx.lineTo(0, 5); ctx.lineTo(-10, 10); ctx.closePath();
-    ctx.fillStyle = C.pearl; ctx.fill(); ctx.strokeStyle = C.ground; ctx.lineWidth = 2; ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, -12); ctx.lineTo(8, 8); ctx.lineTo(0, 4); ctx.lineTo(-8, 8); ctx.closePath();
+    ctx.fillStyle = C.orange; ctx.fill(); ctx.strokeStyle = '#0A0A0F'; ctx.lineWidth = 1.5; ctx.stroke();
     ctx.restore();
+    ctx.textAlign = 'left'; ctx.fillStyle = C.orange; ctx.font = `600 12px ${FONT}`;
+    ctx.fillText('TANOD-01', rx + 12, ry - 4);
+  } else {
+    // Three distinct states, and they must not be confused. A unit reporting
+    // with no fix is working; a unit that has never reported is not.
+    const label = p.unit ? `${p.unit.src || 'unit'} · ${p.unit.mode || 'reporting'} · no position fix` : 'no unit reporting';
+    ctx.textAlign = 'left'; ctx.fillStyle = ink(.4); ctx.fillText(label, 14, h - 40);
   }
-  ctx.textAlign = 'right'; ctx.fillStyle = pearl(.55);
-  // Three distinct states, and they must not be confused. A unit reporting
-  // with no fix is working; a unit that has never reported is not.
-  const unitLabel = pose
-    ? `${(p.unit && p.unit.src) || 'unit'} ▲`
-    : p.unit
-      ? `${p.unit.src || 'unit'} · ${p.unit.mode || 'reporting'} · no position fix`
-      : 'no unit reporting';
-  ctx.fillText(unitLabel, w - 4, 12);
+
+  if (!['zone', 'flood'].includes(state.layer)) {
+    ctx.textAlign = 'left'; ctx.font = `600 11px ${CONDF}`; ctx.fillStyle = ink(.5);
+    ctx.fillText('NO DATA SOURCE CONFIGURED FOR THIS LAYER', 14, h - 16);
+  }
+}
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
 }
 
 /* ---------------- telemetry tail ---------------- */
@@ -1359,8 +1437,6 @@ const tailQ = [], rate = {}, tailLastBySrc = {};
 function tailPush(f) {
   const src = f.src || kind(f), now = performance.now();
   (rate[src] = rate[src] || []).push(now);
-  // 20 Hz robot pose would scroll too fast to read; every node and brain
-  // frame is shown, unit frames thinned to ~2/s. The header shows true rates.
   if (kind(f) === 'unit' && now - (tailLastBySrc[src] || 0) < 480) return;
   tailLastBySrc[src] = now;
   tailQ.push(f);
@@ -1450,7 +1526,7 @@ function replayStart() {
     replay.pos = Math.min(el, replay.dur);
     while (replay.i < replay.frames.length && replay.frames[replay.i].t - replay.t0 <= el) ingest(replay.frames[replay.i++]);
     if (replay.i >= replay.frames.length && el > replay.dur + 2.5) {
-      resetPanel(P.edge); resetPanel(P.central);
+      Object.assign(U, freshPanel()); Object.assign(CLOUD, freshPanel());
       replay.i = 0; replay.start = performance.now();
       tailNote('REPLAY · looping recorded mission');
     }
@@ -1459,8 +1535,8 @@ function replayStart() {
 function replayStop() { clearInterval(replay.timer); }
 
 /* ---------------- real cloud triage ----------------
-   The central panel's whole job is to fail honestly when the uplink dies, so
-   it must make a call that can actually fail. This asks the bridge, the bridge
+   The cloud pane's whole job is to fail honestly when the uplink dies, so it
+   must make a call that can actually fail. This asks the bridge, the bridge
    asks the cloud, and the answer carries decided_on plus the real error text.
    Nothing here is driven by the CUT button's boolean. */
 const triagePoll = { timer: 0, inflight: false };
@@ -1471,7 +1547,7 @@ async function triageOnce() {
   try {
     const r = await fetch(`${API_URL}/triage`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ src: (P.edge.node && P.edge.node.src) || 'node-01' })
+      body: JSON.stringify({ src: (U.node && U.node.src) || 'node-01' })
     });
     const j = await r.json();
     j.rtt_ms = Math.round(performance.now() - t0);
@@ -1484,9 +1560,8 @@ async function triageOnce() {
       latency_ms: Math.round(performance.now() - t0) };
   } finally {
     triagePoll.inflight = false;
-    if (state.source === 'live' && state.triage)
-      P.central.frozen = state.triage.decided_on !== 'cloud';
-    P.central.dirty = true;
+    if (state.source === 'live' && state.triage) CLOUD.frozen = state.triage.decided_on !== 'cloud';
+    CLOUD.dirty = true;
   }
 }
 function triageStart() { clearInterval(triagePoll.timer); triageOnce(); triagePoll.timer = setInterval(triageOnce, 3000); }
@@ -1497,7 +1572,7 @@ function setSource(name) {
   if (state.source === name) return;
   wsStop(); mockStop(); replayStop(); triageStop();
   state.source = name;
-  resetPanel(P.edge); resetPanel(P.central);
+  Object.assign(U, freshPanel()); Object.assign(CLOUD, freshPanel());
   document.querySelectorAll('.srcs button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.src === name)));
   tailNote(`source: ${name.toUpperCase()}`);
   if (name === 'live') { wsConnect(); triageStart(); } else if (name === 'mock') mockStart(); else replayStart();
@@ -1510,21 +1585,58 @@ function setCut(v) {
   state.cut = v; state.cutAt = performance.now();
   // In MOCK and REPLAY the data is canned, so the button drives the panel and
   // that is honest. In LIVE the panel freezes only when a real call really
-  // failed, which the poller decides.
-  if (state.source !== 'live') P.central.frozen = v;
-  P.edge.sinceCut = 0;
-  P.central.el.classList.toggle('dark', v);
-  document.body.classList.toggle('cut', v);
+  // failed, which the triage poller decides -- the bridge itself refuses the
+  // real cloud call while cut ("blocked at the bridge"), so the two agree.
+  if (state.source !== 'live') CLOUD.frozen = v;
+  U.sinceCut = 0;
   cutBtn.setAttribute('aria-pressed', String(v));
   cutBtn.querySelector('.cb-main').textContent = v ? 'NETWORK CUT' : 'CUT NETWORK';
   cutBtn.querySelector('.cb-sub').textContent = v ? 'Press again to restore' : 'Sever the uplink to the cloud';
   if (mock.sim) mock.sim.setCut(v);
   wsSend({ cmd: 'cut_network', cut: v });
-  tailNote(v ? 'uplink cut · central dispatch unreachable · edge keeps deciding' : 'uplink restored');
-  P.central.dirty = true;
+  tailNote(v ? 'uplink cut · cloud dispatch unreachable · edge keeps deciding' : 'uplink restored');
+  CLOUD.dirty = true;
 }
 cutBtn.addEventListener('click', () => setCut(!state.cut));
 document.querySelectorAll('.srcs button').forEach(b => b.addEventListener('click', () => setSource(b.dataset.src)));
+
+/* ---------------- left panel controls ---------------- */
+document.querySelectorAll('.seg button[data-view]').forEach(b => b.addEventListener('click', () => {
+  state.view = b.dataset.view;
+  document.querySelectorAll('.seg button[data-view]').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+  renderLeft();
+}));
+$('unitSearch').addEventListener('input', e => { state.search = e.target.value; renderLeft(); });
+document.querySelectorAll('.chip-f').forEach(b => b.addEventListener('click', () => {
+  state.filter = b.dataset.filter;
+  document.querySelectorAll('.chip-f').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+  renderLeft();
+}));
+
+/* ---------------- map layer switcher ---------------- */
+function setLayer(name) {
+  state.layer = name;
+  document.querySelectorAll('.layer-thumb').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.layer === name)));
+  document.querySelectorAll('.navicon[data-nav=zones],.navicon[data-nav=flood]').forEach(b =>
+    b.setAttribute('aria-pressed', String((b.dataset.nav === 'zones' && name === 'zone') || (b.dataset.nav === 'flood' && name === 'flood'))));
+}
+document.querySelectorAll('.layer-thumb').forEach(b => b.addEventListener('click', () => setLayer(b.dataset.layer)));
+
+/* ---------------- nav rail + settings drawer ---------------- */
+const drawer = $('drawer');
+function openDrawer() { drawer.classList.add('open'); document.querySelectorAll('.navicon').forEach(b => b.dataset.nav === 'settings' && b.setAttribute('aria-pressed', 'true')); }
+function closeDrawer() { drawer.classList.remove('open'); document.querySelectorAll('.navicon').forEach(b => b.dataset.nav === 'settings' && b.setAttribute('aria-pressed', 'false')); }
+$('drawerClose').addEventListener('click', closeDrawer);
+document.querySelectorAll('.navicon').forEach(b => b.addEventListener('click', () => {
+  const nav = b.dataset.nav;
+  document.querySelectorAll('.navicon').forEach(x => x.dataset.nav !== 'settings' && x.setAttribute('aria-pressed', String(x === b)));
+  if (nav === 'settings') { drawer.classList.contains('open') ? closeDrawer() : openDrawer(); return; }
+  if (nav === 'zones') setLayer('zone');
+  else if (nav === 'flood') setLayer('flood');
+  else if (nav === 'payload') { state.view = 'detail'; document.querySelectorAll('.seg button[data-view]').forEach(x => x.setAttribute('aria-pressed', String(x.dataset.view === 'detail'))); renderLeft(); }
+  else if (nav === 'fleet') { setLayer('zone'); }
+}));
+
 document.addEventListener('keydown', e => {
   if (e.metaKey || e.ctrlKey || e.altKey || e.repeat) return;
   const k = e.key.toLowerCase();
@@ -1532,34 +1644,35 @@ document.addEventListener('keydown', e => {
   else if (k === 'l') setSource('live');
   else if (k === 'm') setSource('mock');
   else if (k === 'r') setSource('replay');
+  else if (k === 'escape') closeDrawer();
 });
 
 /* ---------------- loop ---------------- */
-let lastTs = performance.now(), lastTimed = 0;
+let lastTs = performance.now(), lastTimed = 0, lastLeft = 0;
+function stepPlan(p, now) {
+  p.plan = computePlan(p);
+  const rid = p.plan && p.plan.route ? p.plan.route.id : null;
+  if (rid !== p.routeId) { p.routeId = rid; p.routeDrawStart = now; }
+  p.dirty = false;
+}
 function loopBody() {
   const now = performance.now(), dt = Math.min(0.1, (now - lastTs) / 1000); lastTs = now;
   let edgeDirty = false;
-  for (const p of [P.central, P.edge]) {
-    if (p.dirty) { renderPanel(p, now); p.dirty = false; if (p.key === 'edge') edgeDirty = true; }
-    const alive = isAlive(p, now);
-    if (alive && !reduced) p.rot += dt * Math.PI * 2 / 30;           // one turn per 30 s
-    if (!p.frozen && !reduced) p.phase += dt * 2.4;
-    const pulse = alive && !reduced ? Math.max(0, 1 - (now - p.pulseAt) / 650) : 0;
-    drawSun(p.dom.sun, p.rot, pulse * pulse, alive);
-    drawGauge(p, now);
-    drawMap(p, now);
-  }
-  if (edgeDirty) { renderRoutes(); renderStepper(); }
-  const e = P.edge, eAlive = isAlive(e, now);
-  drawSun($('sunMain'), e.rot, eAlive && !reduced ? Math.pow(Math.max(0, 1 - (now - e.pulseAt) / 650), 2) : 0, eAlive);
-  if (now - lastTimed > 200) { lastTimed = now; renderTimed(now); renderRate(now); }
+  if (U.dirty) { stepPlan(U, now); edgeDirty = true; }
+  if (CLOUD.dirty) stepPlan(CLOUD, now);
+  if (edgeDirty && now - lastLeft > 120) { lastLeft = now; renderLeft(); renderRoutesDrawer(); }
+  if (!reduced) { U.phase += dt * 2.4; CLOUD.phase += dt * 2.4; }
+  drawMap(U, $('mapEdge'), now);
+  drawMap(CLOUD, $('mapCloud'), now);
+  if (now - lastTimed > 200) { lastTimed = now; renderTop(now); renderRate(now); }
   flushTail();
 }
 
 // The render loop must never be able to die. Before this, requestAnimationFrame
 // was the last statement in loop(), so a single throw anywhere above it left the
-// loop un-rearmed: every panel frozen forever while the rail clock kept ticking,
-// which looks like working software showing stale data. Only a reload recovered.
+// loop un-rearmed: everything frozen forever while the diagnostics clock kept
+// ticking, which looks like working software showing stale data. Only a reload
+// recovered.
 function loop() {
   try { loopBody(); }
   catch (e) { console.error('[loop]', e); tailNote('render error: ' + (e && e.message)); }
@@ -1568,40 +1681,9 @@ function loop() {
 
 let startSrc = qs.get('src');
 if (!startSrc) { try { startSrc = localStorage.getItem('tanod.src'); } catch (_) {} }
+renderLeft();
 setSource(startSrc || 'live');
 requestAnimationFrame(loop);
-})();
-</script>
-
-<div class="rail" id="rail">
-  <span><b class="k">SYS</b> tanod-ops</span>
-  <span><b class="k">BUILD</b> <i id="rBuild">—</i></span>
-  <span class="opt"><b class="k">NODE</b> node-01</span>
-  <span class="opt"><b class="k">UNIT</b> unit-01</span>
-  <span><b class="k">LINK</b> <i class="led"></i><i class="lnk" id="rLink">UPLINK OK</i></span>
-  <span class="opt"><b class="k">INFERENCE</b> <i id="rInf">LOCAL · GX10</i></span>
-  <span class="grow"><b class="k">UPTIME</b> <i id="rUp">00:00:00</i> &nbsp; <b class="k">UTC</b> <i id="rClk">—</i></span>
-</div>
-<script>
-(function(){
-  var t0=Date.now(), pad=function(n){return String(n).padStart(2,'0')};
-  document.getElementById('rBuild').textContent =
-    'tkb-' + (location.hash.slice(1) || '4547fbc');
-  function tick(){
-    var d=new Date(), u=Math.floor((Date.now()-t0)/1000);
-    document.getElementById('rClk').textContent =
-      pad(d.getUTCHours())+':'+pad(d.getUTCMinutes())+':'+pad(d.getUTCSeconds());
-    document.getElementById('rUp').textContent =
-      pad(Math.floor(u/3600))+':'+pad(Math.floor(u/60)%60)+':'+pad(u%60);
-    // Mirror the uplink state the app already owns, without touching its code.
-    var cut = document.body.classList.contains('cut') ||
-              /CUT|FROZEN/i.test(document.getElementById('runSub')?.textContent||'') ||
-              /NETWORK CUT/i.test(document.body.innerText.slice(0,4000));
-    var rail=document.getElementById('rail');
-    rail.classList.toggle('cut', !!cut);
-    document.getElementById('rLink').textContent = cut ? 'UPLINK SEVERED' : 'UPLINK OK';
-  }
-  tick(); setInterval(tick, 1000);
 })();
 </script>
 </body>
