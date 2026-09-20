@@ -1588,6 +1588,26 @@ function setSource(name) {
   Object.assign(U, freshPanel()); Object.assign(CLOUD, freshPanel());
   document.querySelectorAll('.srcs button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.src === name)));
   tailNote(`source: ${name.toUpperCase()}`);
+  // MOCK and REPLAY carry a scripted mission: a cargo manifest, a battery
+  // reading and GPS coordinates that this build has no hardware to produce.
+  // On a public URL nobody is standing there to say so out loud, so the page
+  // says it itself. LIVE removes the banner, because LIVE is not pretending.
+  (function syntheticBanner() {
+    var id = 'syntheticBanner', el = document.getElementById(id);
+    if (name === 'live') { if (el) el.remove(); return; }
+    if (!el) {
+      el = document.createElement('div');
+      el.id = id;
+      el.setAttribute('role', 'note');
+      el.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:99;' +
+        'background:#7A1C1C;color:#FFF3F3;font:500 15px/1.45 ui-sans-serif,system-ui,sans-serif;' +
+        'padding:10px 18px;text-align:center;letter-spacing:.2px';
+      document.body.appendChild(el);
+    }
+    el.textContent = (name === 'replay' ? 'RECORDED DEMONSTRATION' : 'SYNTHETIC DATA') +
+      ' \u2014 scripted mission data. This build has no battery monitor, no cargo and no position estimate. ' +
+      'The live system decides on the device and reports no position at all.';
+  })();
   if (name === 'live') { wsConnect(); triageStart(); } else if (name === 'mock') mockStart(); else replayStart();
   try { localStorage.setItem('tanod.src', name); } catch (_) {}
 }
