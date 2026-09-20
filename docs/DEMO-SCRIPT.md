@@ -27,7 +27,7 @@ Then start the bridge **from that same shell**, or it will not see the key.
 **2. Start everything.**
 
 ```
-cd Tikbalang
+cd Tanod
 python3 ops/ws_bridge.py --serve-only
 python3 ops/serial_forward.py --port /dev/cu.usbmodemXXXX --host 127.0.0.1
 ```

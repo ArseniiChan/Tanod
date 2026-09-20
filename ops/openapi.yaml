@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
-  title: Tikbalang Telemetry Bridge
+  title: Tanod Telemetry Bridge
   version: 1.0.0
   description: |
-    The contract every layer of Tikbalang agrees on.
+    The contract every layer of Tanod agrees on.
 
     Three ports, and only one of them is REST:
 

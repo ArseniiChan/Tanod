@@ -1,4 +1,4 @@
-# Tikbalang — submission writeup
+# Tanod — submission writeup
 
 Paste-ready. Trim from the bottom to fit the field. Every claim below is
 checkable against the repository, the screen, or a cited source.
@@ -8,8 +8,25 @@ checkable against the repository, the screen, or a cited source.
 ## One line
 
 The Philippines already has 600+ water level sensors. They report over SMS, and
-SMS goes down in the storms that matter. Tikbalang decides on the chip instead,
+SMS goes down in the storms that matter. Tanod decides on the chip instead,
 and shows the answer at the crossing with no network at all.
+
+---
+
+## The name
+
+**Tanod** is Tagalog for the barangay watchman: the village-level guard, posted
+where the national police cannot immediately reach, described in the Local
+Government Code framework as a front liner "in the preparation and response to
+any type of atrocities, public disorders, emergencies and even disasters."
+
+That is not a metaphor for the architecture. It is the architecture. The node
+stands at the crossing and decides for itself when nothing upstream can reach
+it.
+
+This project was previously named after the tikbalang, the Philippine trickster
+that leads travellers astray on the road. For a system whose only job is
+telling you whether you can safely cross, that was exactly backwards.
 
 ---
 
@@ -249,7 +266,7 @@ We cut five tracks that existed only as a line in a planning document.
 
 ## Repository
 
-https://github.com/ArseniiChan/Tikbalang
+https://github.com/ArseniiChan/Tanod
 
 ## Team
 

@@ -1,4 +1,4 @@
-// Tikbalang field node, Arduino UNO Q.
+// Tanod field node, Arduino UNO Q.
 //
 // Runs on the STM32 MCU side. Reads the water surface with a Modulino Distance
 // looking DOWN at it, reads disturbance with a Modulino Movement, classifies

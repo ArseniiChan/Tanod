@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Telemetry bridge for Tikbalang. No dependencies, no pip install.
+Telemetry bridge for Tanod. No dependencies, no pip install.
 
 Three ports, three audiences:
 
@@ -374,7 +374,7 @@ DASH = Path(__file__).resolve().parent.parent / "dashboard" / "index.html"
 
 class Api(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "tikbalang-bridge"
+    server_version = "tanod-bridge"
 
     def log_message(self, *a):
         pass                                    # stderr belongs to the bridge

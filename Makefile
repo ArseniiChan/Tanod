@@ -27,3 +27,14 @@ build/node: $(NODE_SRC)
 node: build/node
 
 .PHONY: node
+
+GAP_SRC := nav/gap.cpp sim/gap_test.cpp
+
+build/gaptest: $(GAP_SRC)
+	@mkdir -p build
+	$(CXX) $(CXXFLAGS) $(GAP_SRC) -o build/gaptest
+
+gaptest: build/gaptest
+	./build/gaptest
+
+.PHONY: gaptest

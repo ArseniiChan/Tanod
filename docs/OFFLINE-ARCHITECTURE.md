@@ -32,7 +32,7 @@ So the claim is precise: **no decision in this system requires the uplink.**
 ## Build it so the claim is physically verifiable
 
 ### 1. The node runs its own access point
-ESP32-S3 in softAP mode. SSID `TIKBALANG-NODE`. The laptop joins THAT, not
+ESP32-S3 in softAP mode. SSID `TANOD-NODE`. The laptop joins THAT, not
 `HackMIT.2026`. A few lines of setup.
 
 Why this matters: a judge can look at the laptop's wifi menu and see we are not

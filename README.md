@@ -1,4 +1,4 @@
-# Tikbalang
+# Tanod
 
 Flood-response logistics that keeps deciding after the network dies.
 
@@ -25,6 +25,23 @@ ground unit. That is the same regime the exposure literature measures, and it is
 the sensing has to be cheap enough to leave in the water.
 
 Built at HackMIT 2026.
+
+---
+
+## The name
+
+**Tanod** is Tagalog for the barangay watchman: the village-level guard, posted
+where the national police cannot immediately reach, described in the Local
+Government Code framework as a front liner "in the preparation and response to
+any type of atrocities, public disorders, emergencies and even disasters."
+
+That is not a metaphor for the architecture. It is the architecture. The node
+stands at the crossing and decides for itself when nothing upstream can reach
+it.
+
+This project was previously named after the tikbalang, the Philippine trickster
+that leads travellers astray on the road. For a system whose only job is
+telling you whether you can safely cross, that was exactly backwards.
 
 ---
 
@@ -58,7 +75,7 @@ flooding in the Philippines routinely takes cell towers down across whole
 municipalities. A delivery robot that phones home for every decision is a robot
 that stops at the moment it becomes useful.
 
-Tikbalang carries its own navigation, its own obstacle handling and its own
+Tanod carries its own navigation, its own obstacle handling and its own
 hazard classification. The laptop is a viewer, never a controller.
 
 ## Architecture

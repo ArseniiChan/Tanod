@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tikbalang · Flood Dispatch</title>
+<title>Tanod · Flood Dispatch</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link media="print" onload="this.media='all'" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,500;0,6..72,600;1,6..72,400&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <!--
-  Tikbalang dashboard. One file, no build step.
+  Tanod dashboard. One file, no build step.
 
   Sources (buttons under CUT NETWORK, or keys L / M / R; C toggles the cut):
     LIVE    WebSocket, default ws://<host>:8765, override with ?ws=ws://host:port
@@ -21,7 +21,7 @@
     unit   {src,t,pose,mode,wp,obstacle_mm,mission,battery_pct}
   Optional third shape from the dispatch brain. If it never arrives the
   dashboard derives route + rejected routes from the node frame with the
-  same planner the mock uses (TikbalangSim.plan):
+  same planner the mock uses (TanodSim.plan):
     brain  {src,t,mission,stage,route:{id,name,len_m},why,rejected:[{id,name,reason}],decided_on}
 
   Frame out on CUT NETWORK (LIVE only): {"cmd":"cut_network","cut":true|false}
@@ -329,7 +329,7 @@ body.cut #cutBtn{background:#1C0A08;border-color:var(--crimson) !important;
 <div class="app">
   <header class="top">
     <div class="brand">
-      <h1>TIKBALANG</h1>
+      <h1>TANOD</h1>
       <p>Flood dispatch that keeps deciding when the network dies.</p>
     </div>
     <div class="sunbox">
@@ -360,7 +360,7 @@ body.cut #cutBtn{background:#1C0A08;border-color:var(--crimson) !important;
   <main class="split">
     <section class="side" id="p-central" aria-label="Central dispatch, counterfactual"
       title="Counterfactual: the same frames, routed through a cloud dispatch server. Cut the network and it has nothing to decide with."></section>
-    <section class="side" id="p-edge" aria-label="Edge autonomy, Tikbalang"></section>
+    <section class="side" id="p-edge" aria-label="Edge autonomy, Tanod"></section>
   </main>
 
   <footer class="bottom">
@@ -602,7 +602,7 @@ body.cut #cutBtn{background:#1C0A08;border-color:var(--crimson) !important;
     return { step, setCut(v) { cut = !!v; }, get scenarioTime() { return s; } };
   }
 
-  g.TikbalangSim = { SITE, toLL, toXY, plan, createSim, PASSABLE_MM, RUNGS };
+  g.TanodSim = { SITE, toLL, toXY, plan, createSim, PASSABLE_MM, RUNGS };
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
 
@@ -927,7 +927,7 @@ body.cut #cutBtn{background:#1C0A08;border-color:var(--crimson) !important;
 <script>
 (function () {
 'use strict';
-const SIM = window.TikbalangSim;
+const SIM = window.TanodSim;
 const SITE = SIM.SITE;
 const qs = new URLSearchParams(location.search);
 const WS_URL = qs.get('ws') || `ws://${location.hostname || 'localhost'}:8765`;
@@ -1501,7 +1501,7 @@ function setSource(name) {
   document.querySelectorAll('.srcs button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.src === name)));
   tailNote(`source: ${name.toUpperCase()}`);
   if (name === 'live') { wsConnect(); triageStart(); } else if (name === 'mock') mockStart(); else replayStart();
-  try { localStorage.setItem('tikbalang.src', name); } catch (_) {}
+  try { localStorage.setItem('tanod.src', name); } catch (_) {}
 }
 
 /* ---------------- cut network ---------------- */
@@ -1567,14 +1567,14 @@ function loop() {
 }
 
 let startSrc = qs.get('src');
-if (!startSrc) { try { startSrc = localStorage.getItem('tikbalang.src'); } catch (_) {} }
+if (!startSrc) { try { startSrc = localStorage.getItem('tanod.src'); } catch (_) {} }
 setSource(startSrc || 'live');
 requestAnimationFrame(loop);
 })();
 </script>
 
 <div class="rail" id="rail">
-  <span><b class="k">SYS</b> tikbalang-ops</span>
+  <span><b class="k">SYS</b> tanod-ops</span>
   <span><b class="k">BUILD</b> <i id="rBuild">—</i></span>
   <span class="opt"><b class="k">NODE</b> node-01</span>
   <span class="opt"><b class="k">UNIT</b> unit-01</span>

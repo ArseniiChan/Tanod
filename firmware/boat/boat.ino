@@ -1,4 +1,4 @@
-// Tikbalang surface unit, board 2.
+// Tanod surface unit, board 2.
 //
 // Reads a DFRobot SEN0628 8x8 matrix ToF looking FORWARD, decides whether the
 // water ahead is blocked, and drives the hull. Prints one unit telemetry frame
@@ -16,6 +16,7 @@
 
 #include "DFRobot_MatrixLidar.h"
 #include "avoid.h"
+#include "gap.h"
 #include <Servo.h>
 #include <math.h>
 
@@ -55,11 +56,13 @@ static const float FIN_HZ       = 1.4f;  // flap rate, PADDLE_WHEELS 0
 // other. Check this dry, before the hull is in the water.
 static const int   FIN_R_SIGN   = 1;
 
-static const int   BLOCK_MM     = 400;   // closer than this counts as blocked
 static const int   MIN_VALID_MM = 20;    // below this the zone is noise
 static const int   MAX_VALID_MM = 3500;  // sensor spec ceiling
+static const int   SAFE_MM      = 600;   // a column counts as open beyond this
+static const int   MIN_GAP_BINS = 2;     // an opening must fit the hull
 
 static const float CRUISE       = 0.55f; // throttle when running clear
+static const float TURN_GAIN    = 0.45f; // differential applied at full steer
 
 static const char* SRC     = "unit-01";
 static const char* MISSION = "m-live";
@@ -81,21 +84,22 @@ static long  tick = 0;
 
 static float clamp1(float v) { return v < -1.0f ? -1.0f : (v > 1.0f ? 1.0f : v); }
 
-// Minimum range across the forward-facing centre of the array. The outer rows
-// see the water surface and the ceiling, which are not obstacles, so only the
-// middle band is used. Returns -1 when no zone returned a usable range, which
-// is a fault and must not be read as "clear".
-static int forward_mm() {
-  if (tof.getAllData(zones) != 0) return -1;
-  int best = -1;
-  for (int y = 3; y <= 4; ++y) {
-    for (int x = 2; x <= 5; ++x) {
-      const int v = (int)zones[y * 8 + x];
-      if (v < MIN_VALID_MM || v > MAX_VALID_MM) continue;   // no return
-      if (best < 0 || v < best) best = v;
-    }
+// Read the whole field and choose a direction, rather than collapsing 64
+// zones into one number. nav/gap.cpp does the choosing and is the same file
+// the native test harness exercises, so the steering the judges watch is the
+// steering that was tested. See sim/gap_test.cpp.
+static Gap look_ahead() {
+  Gap none;
+  if (tof.getAllData(zones) != 0) {
+    snprintf(none.why, sizeof(none.why), "lidar read failed");
+    return none;
   }
-  return best;
+  GapConfig cfg;
+  cfg.min_valid_mm = MIN_VALID_MM;
+  cfg.max_valid_mm = MAX_VALID_MM;
+  cfg.safe_mm      = SAFE_MM;
+  cfg.min_width    = MIN_GAP_BINS;
+  return choose_gap(zones, cfg);
 }
 
 // One H-bridge channel. Coast at zero rather than brake: a braked paddle wheel
@@ -193,9 +197,8 @@ void setup() {
 void loop() {
   handle_serial();
 
-  const int mm = sensor_ok ? forward_mm() : -1;
-  const bool fault   = (mm < 0);
-  const bool blocked = (!fault && mm < BLOCK_MM);
+  const Gap g   = sensor_ok ? look_ahead() : Gap();
+  const bool fault = !sensor_ok || (g.valid_bins == 0);
 
   MotorCommand cmd;
   const char* mode;
@@ -207,38 +210,45 @@ void loop() {
     // No range means no answer, not open water. Stop rather than drive blind.
     mode = "IDLE";
     avoiding = false;
+  } else if (!g.ok) {
+    // The field is readable and there is nowhere to go. Back out and pivot,
+    // using the same reactive behaviour the simulator runs.
+    if (!avoiding) { avoid_reset(); avoiding = true; }
+    cmd = avoid_step();
+    if (cmd.left == 0.0 && cmd.right == 0.0) avoiding = false;
+    mode = avoiding ? "AVOIDING" : "IDLE";
   } else {
-    if (blocked && !avoiding) { avoid_reset(); avoiding = true; }
-    if (avoiding) {
-      cmd = avoid_step();
-      // avoid.cpp returns a zero command on the tick its cycle completes.
-      if (cmd.left == 0.0 && cmd.right == 0.0) avoiding = false;
-    }
-    if (avoiding) {
-      mode = "AVOIDING";
-    } else {
-      cmd.left = CRUISE; cmd.right = CRUISE;
-      mode = "DRIVING";
-    }
+    // An opening exists. Steer at its middle. This is the only place the unit
+    // chooses a direction, and it does so from the sensor alone: no map, no
+    // waypoint, no position estimate, because on water there is none.
+    avoiding = false;
+    const float turn = g.steer * TURN_GAIN;
+    cmd.left  = CRUISE + turn;
+    cmd.right = CRUISE - turn;
+    mode = (g.steer > -0.15f && g.steer < 0.15f) ? "DRIVING" : "REROUTING";
   }
 
   drive(cmd, (float)millis() / 1000.0f);
 
   if (tick % TX_EVERY == 0) {
-    char buf[256];
+    char buf[352];
     const long t = boot_epoch + (long)(millis() / 1000);
     if (fault) {
       snprintf(buf, sizeof(buf),
         "{\"src\":\"%s\",\"t\":%ld,\"pose\":null,\"mode\":\"%s\","
-        "\"obstacle_mm\":null,\"fault\":\"%s\",\"mission\":\"%s\","
+        "\"obstacle_mm\":null,\"steer\":null,\"fault\":\"%s\",\"mission\":\"%s\","
         "\"link\":{\"uplink\":true,\"inference\":\"local\"},\"decided_on\":\"device\"}",
-        SRC, t, mode, sensor_ok ? "no range returned" : "lidar not responding", MISSION);
+        SRC, t, mode, sensor_ok ? g.why : "lidar not responding", MISSION);
     } else {
+      // steer and gap are printed because a steering command nobody can read
+      // is indistinguishable from a random one.
+      char steer_s[12];
+      snprintf(steer_s, sizeof(steer_s), "%.2f", (double)g.steer);
       snprintf(buf, sizeof(buf),
         "{\"src\":\"%s\",\"t\":%ld,\"pose\":null,\"mode\":\"%s\","
-        "\"obstacle_mm\":%d,\"mission\":\"%s\","
+        "\"obstacle_mm\":%d,\"steer\":%s,\"gap\":\"%s\",\"mission\":\"%s\","
         "\"link\":{\"uplink\":true,\"inference\":\"local\"},\"decided_on\":\"device\"}",
-        SRC, t, mode, mm, MISSION);
+        SRC, t, mode, g.ahead_mm, g.ok ? steer_s : "0.00", g.why, MISSION);
     }
     Serial.println(buf);
   }

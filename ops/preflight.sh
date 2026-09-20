@@ -17,7 +17,7 @@ FAILS=0
 ok()   { printf '  OK    %s\n' "$1"; }
 bad()  { printf '  FAIL  %s\n    -> %s\n' "$1" "$2"; FAILS=$((FAILS+1)); }
 
-echo "Tikbalang preflight against $API"
+echo "Tanod preflight against $API"
 echo
 
 # ---- bridge -----------------------------------------------------------------

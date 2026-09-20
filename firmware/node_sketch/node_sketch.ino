@@ -1,4 +1,4 @@
-// Tikbalang field node. Reads a water ladder, classifies on the chip, prints
+// Tanod field node. Reads a water ladder, classifies on the chip, prints
 // one telemetry frame per reading to Serial.
 //
 // This sketch does NOT contain a copy of the classifier. It compiles the real
